@@ -1,0 +1,1051 @@
+  function renderMatchupPanel(teamKey, opt, league){
+    const total = lineupTotal(opt.assignment, opt.pool);
+    const usedElsewhereBase = opt.assignment;
+    const rowsHTML = opt.slotOrder.map((slot, i) => {
+      const pid = opt.assignment[i];
+      const eligible = SLOT_ELIGIBILITY[slot] || [slot];
+      const usedElsewhere = new Set(usedElsewhereBase.filter((v, idx) => idx !== i && v));
+      const candidates = opt.pool
+        .filter(p => eligible.includes(p.pos))
+        .filter(p => !usedElsewhere.has(p.pid) || p.pid === pid)
+        .sort((a,b) => b.proj - a.proj);
+      const optionsHTML = candidates.map(p => `<option value="${p.pid}" ${p.pid===pid?'selected':''}>${p.info?p.info.name:p.pid} (${p.pos}) — ${p.hasProj?p.proj.toFixed(1):'—'} pts</option>`).join('');
+      const chosen = opt.pool.find(p => p.pid === pid);
+      const ptsDisplay = chosen ? (chosen.hasProj ? chosen.proj.toFixed(1) : '—') : '0.0';
+      return `
+        <div class="matchup-slot-row">
+          <div class="slot-tag ${slotColorClass(slot)}">${slotLabel(slot)}</div>
+          <select class="matchup-select" data-team="${teamKey}" data-slot="${i}">
+            ${!pid ? '<option value="" selected>— Empty —</option>' : ''}${optionsHTML}
+          </select>
+          <div class="mono" style="width:48px; text-align:right; color:var(--chalk-dim); font-size:12px;">${ptsDisplay}</div>
+        </div>
+      `;
+    }).join('');
+
+    const usedSet = new Set(opt.assignment.filter(Boolean));
+    const bench = opt.pool.filter(p => !usedSet.has(p.pid)).sort((a,b) => b.proj - a.proj);
+    const benchHTML = bench.length ? bench.map(p => `
+      <div class="matchup-slot-row">
+        <div class="slot-tag tag-grey">BN</div>
+        <div class="player-name ${nameColorClass(p.pos)}" style="flex:1; font-size:12.5px;">${p.info ? playerNameHTML(p.info) : p.pid}</div>
+        <div class="mono" style="width:48px; text-align:right; color:var(--chalk-dim); font-size:12px;">${p.hasProj ? p.proj.toFixed(1) : '—'}</div>
+      </div>
+    `).join('') : '<div style="color:var(--chalk-faint); font-size:12px; padding:4px 0;">Nobody left on the bench.</div>';
+
+    return `
+      <div class="matchup-panel" id="matchup-panel-${teamKey}">
+        <div class="matchup-panel-header">
+          ${avatarHTML(opt.user && opt.user.avatar, opt.user && opt.user.display_name, 32)}
+          <div>
+            <div class="matchup-team-name">${opt.teamName}</div>
+            <div class="owner-name">${opt.user ? opt.user.display_name : 'Unknown'}</div>
+          </div>
+        </div>
+        <div class="matchup-total" id="matchup-total-${teamKey}">${total.toFixed(1)}<span style="font-size:12px; color:var(--chalk-faint); font-family:'Inter',sans-serif;"> pts</span></div>
+        <div class="matchup-slots">${rowsHTML}</div>
+        <div class="roster-group-title" style="margin-top:16px;">Bench</div>
+        <div class="matchup-slots">${benchHTML}</div>
+      </div>
+    `;
+  }
+
+  function renderMatchupTab(detail){
+    if(!detail.myRosterId){
+      return `<div class="empty-note">Couldn't find your team in this league.</div>`;
+    }
+    const pair = findMatchupPair(detail);
+    if(!pair || !pair.opp){
+      detail.matchupState = null;
+      return `<div class="empty-note">Week ${getProjectionWeek()} matchups haven't been generated for this league yet — Sleeper publishes the schedule closer to the season starting. Check back later.</div>`;
+    }
+    const myRoster = detail.rosters.find(r => r.roster_id === pair.mine.roster_id);
+    const oppRoster = detail.rosters.find(r => r.roster_id === pair.opp.roster_id);
+    const myUser = detail.usersById[myRoster.owner_id];
+    const oppUser = detail.usersById[oppRoster.owner_id];
+
+    detail.matchupState = {
+      my: {...computeOptimalLineup(myRoster, detail.league), teamName: teamDisplayName(myUser, myRoster) + ' (You)', user: myUser},
+      opp: {...computeOptimalLineup(oppRoster, detail.league), teamName: teamDisplayName(oppUser, oppRoster), user: oppUser},
+    };
+
+    return `
+      <div class="empty-note" style="margin-bottom:14px;">Both lineups are auto-built from Week ${getProjectionWeek()} projections into each team's best possible starting lineup. Use the dropdowns to swap any player and see how each total — and the edge — changes.</div>
+      <div id="matchup-edge" style="margin-bottom:14px;"></div>
+      <div class="matchup-grid">
+        ${renderMatchupPanel('my', detail.matchupState.my, detail.league)}
+        <div class="matchup-vs">VS</div>
+        ${renderMatchupPanel('opp', detail.matchupState.opp, detail.league)}
+      </div>
+    `;
+  }
+
+  function bindMatchupTab(detail){
+    if(!detail.matchupState) return;
+
+    function updateEdge(){
+      const edgeEl = document.getElementById('matchup-edge');
+      if(!edgeEl) return;
+      const myTotal = lineupTotal(detail.matchupState.my.assignment, detail.matchupState.my.pool);
+      const oppTotal = lineupTotal(detail.matchupState.opp.assignment, detail.matchupState.opp.pool);
+      const diff = myTotal - oppTotal;
+      if(Math.abs(diff) < 0.05){
+        edgeEl.innerHTML = `<span class="pill">Dead even</span>`;
+      } else if(diff > 0){
+        edgeEl.innerHTML = `<span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">You're projected ahead by ${diff.toFixed(1)} pts</span>`;
+      } else {
+        edgeEl.innerHTML = `<span class="pill" style="background:rgba(232,92,74,0.15); color:#E85C4A;">Behind by ${Math.abs(diff).toFixed(1)} pts</span>`;
+      }
+    }
+
+    function bindPanel(teamKey){
+      document.querySelectorAll(`select[data-team="${teamKey}"]`).forEach(sel => {
+        sel.addEventListener('change', () => {
+          const slotIdx = parseInt(sel.dataset.slot, 10);
+          detail.matchupState[teamKey].assignment[slotIdx] = sel.value || null;
+          const panelEl = document.getElementById('matchup-panel-' + teamKey);
+          panelEl.outerHTML = renderMatchupPanel(teamKey, detail.matchupState[teamKey], detail.league);
+          bindPanel(teamKey);
+          updateEdge();
+        });
+      });
+    }
+
+    bindPanel('my');
+    bindPanel('opp');
+    updateEdge();
+  }
+
+  function computeEffectiveRosterPids(basePids, moves, week){
+    let pids = [...basePids];
+    const applicable = moves.filter(m => m.week <= week).sort((a,b) => a.week - b.week);
+    applicable.forEach(m => {
+      if(m.dropPid) pids = pids.filter(p => p !== m.dropPid);
+      if(m.addPid && !pids.includes(m.addPid)) pids.push(m.addPid);
+    });
+    return pids;
+  }
+
+  function getInjuryBadge(pid){
+    const p = state.playersCache ? state.playersCache[pid] : null;
+    const status = p && p.injury_status;
+    if(!status) return '';
+    const color = (status === 'Out' || status === 'IR' || status === 'PUP') ? '#E85C4A' : '#E0A458';
+    return ` <span style="color:${color}; font-size:10px; font-weight:700; border:1px solid ${color}; border-radius:4px; padding:1px 4px;">${status.toUpperCase()}</span>`;
+  }
+
+  function plannerMatchupText(pid, week){
+    const info = playerLabel(pid);
+    if(!info || !info.team || info.team === 'FA') return '';
+    if(BYE_WEEKS[info.team] === week) return '<span style="color:var(--chalk-faint);">BYE</span>';
+    const m = getMatchup(info.team, week);
+    if(!m) return '<span style="color:var(--chalk-faint);">—</span>';
+    const rank = getMatchupDifficulty(info.pos, m.opp);
+    const color = rankColor(rank);
+    const badge = color ? ` <span style="background:${color}; color:#fff; padding:0 4px; border-radius:3px; font-size:10px; font-weight:700;">${rank}</span>` : '';
+    return `vs ${m.opp}${badge}`;
+  }
+
+  function renderPlannerLineupSection(detail){
+    const st = detail.plannerState;
+    const total = lineupTotal(st.assignment, st.pool);
+    const usedSet = new Set(st.assignment.filter(Boolean));
+    const bench = st.pool.filter(p => !usedSet.has(p.pid)).sort((a,b) => b.proj - a.proj);
+
+    const slotRows = st.slotOrder.map((slot,i) => {
+      const pid = st.assignment[i];
+      const eligible = SLOT_ELIGIBILITY[slot] || [slot];
+      const usedElsewhere = new Set(st.assignment.filter((v,idx)=>idx!==i && v));
+      const candidates = st.pool.filter(p => eligible.includes(p.pos)).filter(p => !usedElsewhere.has(p.pid) || p.pid===pid).sort((a,b)=>b.proj-a.proj);
+      const optionsHTML = candidates.map(p => `<option value="${p.pid}" ${p.pid===pid?'selected':''}>${p.info?p.info.name:p.pid} (${p.pos}) — ${p.hasProj?p.proj.toFixed(1):'—'} pts</option>`).join('');
+      const chosen = st.pool.find(p=>p.pid===pid);
+      return `
+        <div class="matchup-slot-row">
+          <div class="slot-tag ${slotColorClass(slot)}">${slotLabel(slot)}</div>
+          <select class="matchup-select" data-planner-slot="${i}">
+            ${!pid ? '<option value="" selected>— Empty —</option>' : ''}${optionsHTML}
+          </select>
+          <div style="width:90px; font-size:11px; color:var(--chalk-dim);">${pid ? plannerMatchupText(pid, st.week) : ''}${pid?getInjuryBadge(pid):''}</div>
+          <div class="mono" style="width:44px; text-align:right; color:var(--chalk-dim); font-size:12px;">${chosen ? (chosen.hasProj?chosen.proj.toFixed(1):'—') : '0.0'}</div>
+        </div>
+      `;
+    }).join('');
+
+    const benchHTML = bench.map(p => `
+      <div class="matchup-slot-row">
+        <div class="slot-tag tag-grey">BN</div>
+        <div class="player-name ${p.info?nameColorClass(p.info.pos):''}" style="flex:1; font-size:12.5px;">${p.info?playerNameHTML(p.info):p.pid}</div>
+        <div style="width:90px; font-size:11px; color:var(--chalk-dim);">${plannerMatchupText(p.pid, st.week)}${getInjuryBadge(p.pid)}</div>
+        <div class="mono" style="width:44px; text-align:right; color:var(--chalk-dim); font-size:12px;">${p.hasProj?p.proj.toFixed(1):'—'}</div>
+      </div>
+    `).join('') || '<div style="color:var(--chalk-faint); font-size:12px; padding:6px 0;">Nobody on the bench.</div>';
+
+    return `
+      <div class="matchup-total" id="planner-total" style="margin-bottom:14px;">${total.toFixed(1)}<span style="font-size:12px; color:var(--chalk-faint); font-family:'Inter',sans-serif;"> pts — Week ${st.week} plan</span></div>
+      <div class="roster-group-title">Starting Lineup</div>
+      <div class="matchup-slots" style="margin-bottom:18px;">${slotRows}</div>
+      <div class="roster-group-title">Bench</div>
+      <div class="matchup-slots" style="margin-bottom:22px;">${benchHTML}</div>
+    `;
+  }
+
+  function renderPlannerLineupView(detail){
+    const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
+    if(!myRoster) return `<div class="empty-note">Couldn't find your team in this league.</div>`;
+    const week = state.plannerWeek;
+    const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
+    const basePids = (myRoster.players || []).filter(pid => !excluded.has(pid));
+    const effectivePids = computeEffectiveRosterPids(basePids, detail.plannerMoves, week);
+    const lineup = computePlannerLineup(effectivePids, detail.league, week);
+    detail.plannerState = {week, slotOrder: lineup.slotOrder, assignment: lineup.assignment, pool: lineup.pool};
+
+    const weekButtons = Array.from({length:18}, (_,i)=>i+1).map(w =>
+      `<button class="btn ${w===week?'btn-primary':'btn-ghost'}" data-planner-week="${w}" style="padding:5px 9px; font-size:12px;">${w}</button>`
+    ).join('');
+
+    const movesThisFar = detail.plannerMoves.slice().sort((a,b)=>a.week-b.week);
+    const movesHTML = movesThisFar.length ? movesThisFar.map((m,idx) => {
+      const addInfo = playerLabel(m.addPid);
+      const dropInfo = playerLabel(m.dropPid);
+      return `
+        <div class="overview-row" style="cursor:default; padding:10px 14px;">
+          <div class="overview-main">
+            <div style="font-size:12px;"><strong>Week ${m.week}:</strong> +${addInfo?addInfo.name:m.addPid} / −${dropInfo?dropInfo.name:m.dropPid}</div>
+          </div>
+          <button class="btn-danger-ghost" data-remove-move="${idx}">Undo</button>
+        </div>
+      `;
+    }).join('') : '<div style="color:var(--chalk-faint); font-size:12px;">No planned moves yet.</div>';
+
+    return `
+      <div class="empty-note" style="margin-bottom:10px;">
+        Plan your lineup week by week and test out waiver moves before making them for real — this is a personal what-if planner and can't submit anything to Sleeper itself. Matchup shows opponent only (no home/away — ask if you want to know why), pulled from the 2026 schedule; BYE and injury status come straight from Sleeper's own data. Swapping players in the lineup below is a live "what if" — it recalculates instantly but doesn't touch your real roster; use "Add From Waivers" to actually change who's on your team.
+      </div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px;">${weekButtons}</div>
+      <div id="planner-lineup-section">${renderPlannerLineupSection(detail)}</div>
+
+      <div class="payout-card">
+        <div class="section-title" style="margin-top:0;">Add From Waivers (effective Week ${week} onward)</div>
+        <div class="field" style="max-width:320px;">
+          <label>Search available players</label>
+          <input id="planner-waiver-search" type="text" placeholder="e.g. player name"/>
+        </div>
+        <div id="planner-waiver-results" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="payout-card" style="margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">Planned Moves</div>
+        <div class="overview-list">${movesHTML}</div>
+      </div>
+    `;
+  }
+
+  function renderSeasonPlannerTab(detail){
+    const sub = state.plannerSubView;
+    return `
+      <div class="tabs" style="margin-bottom:16px;">
+        <div class="tab ${sub==='lineup'?'active':''}" data-planner-sub="lineup">Lineup Planner</div>
+        <div class="tab ${sub==='rankings'?'active':''}" data-planner-sub="rankings">Matchup Rankings</div>
+        <div class="tab ${sub==='season'?'active':''}" data-planner-sub="season">Season Overview</div>
+      </div>
+      <div id="planner-subview">
+        ${sub === 'rankings' ? renderMatchupRankingsView() : sub === 'season' ? renderSeasonOverviewView(detail) : renderPlannerLineupView(detail)}
+      </div>
+    `;
+  }
+
+  function bindSeasonPlannerTab(detail){
+    document.querySelectorAll('[data-planner-sub]').forEach(t => t.addEventListener('click', () => {
+      state.plannerSubView = t.dataset.plannerSub;
+      render();
+    }));
+    const sub = state.plannerSubView;
+    if(sub === 'rankings') bindMatchupRankingsView();
+    else if(sub !== 'season') bindPlannerLineupView(detail);
+  }
+
+  function renderMatchupRankingsView(){
+    if(!state.rankingsPositionTab) state.rankingsPositionTab = 'QB';
+    const pos = state.rankingsPositionTab;
+    const table = (state.matchupRankings && state.matchupRankings[pos]) || {};
+    const teams = Object.keys(BYE_WEEKS).sort();
+    const posTabsHTML = RANKING_POSITIONS.map(p =>
+      `<div class="tab ${p===pos?'active':''}" data-ranking-pos="${p}">${p}</div>`
+    ).join('');
+    const rowsHTML = teams.map(team => `
+      <div style="display:flex; align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--line);">
+        <div style="width:48px; font-weight:600; font-size:13px;">${team}</div>
+        <input type="number" min="1" max="32" data-rank-team="${team}" value="${table[team] != null ? table[team] : ''}" placeholder="1-32" style="width:70px; background:var(--bg); border:1px solid var(--line-strong); color:var(--chalk); padding:6px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace;"/>
+        <div id="rank-swatch-${team}" style="width:20px; height:20px; border-radius:4px; background:${rankColor(table[team]) || 'transparent'}; border:1px solid var(--line-strong);"></div>
+      </div>
+    `).join('');
+
+    return `
+      <div class="empty-note" style="margin-bottom:14px;">
+        Enter each team's matchup difficulty for this position: <strong>1 = hardest matchup, 32 = easiest</strong>. These are your own rankings — Sleeper doesn't provide this. Every number 1-32 should be used once per position, but nothing stops you from leaving gaps or duplicates if you're still working through it.
+      </div>
+      <div class="tabs" style="margin-bottom:14px;">${posTabsHTML}</div>
+      <div style="max-width:280px; max-height:520px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:4px 10px;">${rowsHTML}</div>
+      <button class="btn btn-primary" id="btn-save-rankings" style="margin-top:14px;">Save ${pos} Rankings</button>
+    `;
+  }
+
+  function bindMatchupRankingsView(){
+    document.querySelectorAll('[data-ranking-pos]').forEach(t => t.addEventListener('click', () => {
+      state.rankingsPositionTab = t.dataset.rankingPos;
+      document.getElementById('planner-subview').innerHTML = renderMatchupRankingsView();
+      bindMatchupRankingsView();
+    }));
+    document.querySelectorAll('[data-rank-team]').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const swatch = document.getElementById('rank-swatch-' + inp.dataset.rankTeam);
+        if(swatch) swatch.style.background = rankColor(parseInt(inp.value,10)) || 'transparent';
+      });
+    });
+    const saveBtn = document.getElementById('btn-save-rankings');
+    if(saveBtn) saveBtn.addEventListener('click', async () => {
+      const pos = state.rankingsPositionTab;
+      if(!state.matchupRankings) state.matchupRankings = {};
+      const table = {};
+      document.querySelectorAll('[data-rank-team]').forEach(inp => {
+        if(inp.value !== '') table[inp.dataset.rankTeam] = parseInt(inp.value, 10);
+      });
+      state.matchupRankings[pos] = table;
+      await saveMatchupRankings(state.matchupRankings);
+      toast(pos + ' rankings saved');
+    });
+  }
+
+  function renderSeasonOverviewView(detail){
+    const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
+    if(!myRoster) return `<div class="empty-note">Couldn't find your team in this league.</div>`;
+    const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
+    const pids = (myRoster.players || []).filter(pid => !excluded.has(pid));
+    const players = pids.map(pid => ({pid, info: playerLabel(pid)})).filter(p => p.info)
+      .sort((a,b) => (a.info.pos||'').localeCompare(b.info.pos||'') || a.info.name.localeCompare(b.info.name));
+
+    const weekHeaders = Array.from({length:18}, (_,i)=>i+1).map(w => `<th style="min-width:36px;">${w}</th>`).join('');
+    const rows = players.map(p => {
+      const cells = Array.from({length:18}, (_,i) => {
+        const week = i+1;
+        const team = p.info.team;
+        if(!team || team === 'FA') return '<td>—</td>';
+        if(BYE_WEEKS[team] === week) return '<td style="color:var(--chalk-faint); font-size:11px;">BYE</td>';
+        const m = getMatchup(team, week);
+        if(!m) return '<td>—</td>';
+        const rank = getMatchupDifficulty(p.info.pos, m.opp);
+        const color = rankColor(rank);
+        return `<td>${color ? `<span style="background:${color}; color:#fff; padding:1px 5px; border-radius:3px; font-size:10.5px; font-weight:700;">${rank}</span>` : '<span style="color:var(--chalk-faint); font-size:10.5px;">'+m.opp+'</span>'}</td>`;
+      }).join('');
+      return `<tr><td style="text-align:left; white-space:nowrap;"><span class="${nameColorClass(p.info.pos)}" style="font-weight:600;">${p.info.name}</span> <span style="color:var(--chalk-faint); font-size:11px;">${p.info.pos}</span></td>${cells}</tr>`;
+    }).join('');
+
+    return `
+      <div class="empty-note" style="margin-bottom:14px;">Your current roster's matchup difficulty, Week 1 through 18, using the rankings you've entered. Blank/grey cells mean no ranking entered yet for that position.</div>
+      <div style="overflow-x:auto;">
+        <table class="standings-table" style="text-align:center;">
+          <thead><tr><th style="text-align:left;">Player</th>${weekHeaders}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function bindPlannerLineupView(detail){
+    const week = state.plannerWeek;
+
+    document.querySelectorAll('[data-planner-week]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        state.plannerWeek = parseInt(btn.dataset.plannerWeek, 10);
+        const content = document.getElementById('planner-subview');
+        content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Week ${state.plannerWeek} projections...</div>`;
+        await ensurePlannerProjectionsForWeek(state.plannerWeek).catch(()=>null);
+        content.innerHTML = renderPlannerLineupView(detail);
+        bindPlannerLineupView(detail);
+      });
+    });
+
+    function bindLineupSelects(){
+      document.querySelectorAll('[data-planner-slot]').forEach(sel => {
+        sel.addEventListener('change', () => {
+          const slotIdx = parseInt(sel.dataset.plannerSlot, 10);
+          detail.plannerState.assignment[slotIdx] = sel.value || null;
+          document.getElementById('planner-lineup-section').innerHTML = renderPlannerLineupSection(detail);
+          bindLineupSelects();
+        });
+      });
+    }
+    bindLineupSelects();
+
+    document.querySelectorAll('[data-remove-move]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = parseInt(btn.dataset.removeMove, 10);
+        const moves = detail.plannerMoves.slice().sort((a,b)=>a.week-b.week);
+        const target = moves[idx];
+        detail.plannerMoves = detail.plannerMoves.filter(m => m !== target);
+        await savePlannerMoves(state.currentLeagueId, detail.plannerMoves);
+        renderCurrentTab();
+      });
+    });
+
+    function paintWaiverResults(query){
+      const resultsEl = document.getElementById('planner-waiver-results');
+      const q = query.trim().toLowerCase();
+      if(q.length < 2){
+        resultsEl.innerHTML = '<div style="color:var(--chalk-faint); font-size:12px;">Type at least 2 letters of a player\'s name.</div>';
+        return;
+      }
+      const owned = computeOwnedPlayerIds(detail);
+      const alreadyPlanned = new Set(detail.plannerMoves.map(m=>m.addPid));
+      const cache = state.playersCache || {};
+      const matches = [];
+      for(const pid in cache){
+        if(owned.has(pid) || alreadyPlanned.has(pid)) continue;
+        const p = cache[pid];
+        if(!p || !p.full_name) continue;
+        if(p.full_name.toLowerCase().includes(q)){
+          matches.push({pid, name: p.full_name, pos: p.position, team: p.team});
+          if(matches.length >= 15) break;
+        }
+      }
+      resultsEl.innerHTML = matches.length ? matches.map(p => `
+        <div class="player-row">
+          <div class="slot-tag ${slotColorClass(p.pos)}">${p.pos||'?'}</div>
+          <div class="player-name ${nameColorClass(p.pos)}" style="flex:1;">${p.name} <span style="color:var(--chalk-faint); font-size:11px;">${p.team||'FA'}</span></div>
+          <button class="btn btn-primary" data-stage-add="${p.pid}" style="font-size:11px; padding:5px 10px;">Add</button>
+        </div>
+      `).join('') : '<div style="color:var(--chalk-faint); font-size:12px;">No matching available players.</div>';
+
+      resultsEl.querySelectorAll('[data-stage-add]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const addPid = btn.dataset.stageAdd;
+          const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
+          const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
+          const basePids = (myRoster.players || []).filter(pid => !excluded.has(pid));
+          const effectivePids = computeEffectiveRosterPids(basePids, detail.plannerMoves, week);
+          const dropOptionsHTML = effectivePids.map(pid => {
+            const info = playerLabel(pid);
+            return `<option value="${pid}">${info?info.name:pid} (${info?info.pos:'?'})</option>`;
+          }).join('');
+          resultsEl.innerHTML = `
+            <div class="payout-card">
+              <div style="font-size:13px; margin-bottom:10px;">Adding <strong>${playerLabel(addPid)?playerLabel(addPid).name:addPid}</strong> starting Week ${week}. Who comes off your roster?</div>
+              <div class="field">
+                <label>Drop</label>
+                <select id="planner-drop-select">${dropOptionsHTML}</select>
+              </div>
+              <button class="btn btn-primary" id="planner-confirm-move" style="margin-top:10px;">Confirm Move</button>
+              <button class="btn btn-ghost" id="planner-cancel-move" style="margin-top:10px;">Cancel</button>
+            </div>
+          `;
+          document.getElementById('planner-confirm-move').addEventListener('click', async () => {
+            const dropPid = document.getElementById('planner-drop-select').value;
+            detail.plannerMoves.push({week, addPid, dropPid});
+            await savePlannerMoves(state.currentLeagueId, detail.plannerMoves);
+            toast('Move planned');
+            renderCurrentTab();
+          });
+          document.getElementById('planner-cancel-move').addEventListener('click', () => {
+            paintWaiverResults(document.getElementById('planner-waiver-search').value);
+          });
+        });
+      });
+    }
+
+    const searchInput = document.getElementById('planner-waiver-search');
+    if(searchInput) searchInput.addEventListener('input', (e) => paintWaiverResults(e.target.value));
+  }
+
+  function renderCurrentTab(){
+    render();
+  }
+
+  function buildWaiverCandidatesByPosition(detail){
+    const owned = computeOwnedPlayerIds(detail);
+    const trendingMap = {};
+    (state.trendingCache || []).forEach(t => trendingMap[t.player_id] = t.count);
+    const proj = state.projectionsCache;
+    const groups = {};
+    WAIVER_POSITIONS.forEach(p => groups[p] = []);
+
+    if(proj){
+      Object.keys(proj.byPlayer).forEach(pid => {
+        if(owned.has(pid)) return;
+        const info = playerLabel(pid);
+        if(!info || !groups[info.pos]) return;
+        const pts = projectedPoints(pid, detail.league);
+        if(pts == null) return;
+        groups[info.pos].push({...info, pid, proj: pts, adds: trendingMap[pid] || 0});
+      });
+    } else {
+      // Projections didn't load this session (undocumented endpoint) — fall back to trending adds only.
+      (state.trendingCache || []).forEach(t => {
+        if(owned.has(t.player_id)) return;
+        const info = playerLabel(t.player_id);
+        if(!info || !groups[info.pos]) return;
+        groups[info.pos].push({...info, pid: t.player_id, proj: null, adds: t.count});
+      });
+    }
+
+    Object.keys(groups).forEach(pos => {
+      groups[pos].sort((a,b) => {
+        if(a.proj != null && b.proj != null) return b.proj - a.proj;
+        if(a.proj != null) return -1;
+        if(b.proj != null) return 1;
+        return b.adds - a.adds;
+      });
+    });
+    return {groups, proj};
+  }
+
+  function renderWaiverWireTab(detail){
+    const {groups, proj} = buildWaiverCandidatesByPosition(detail);
+
+    const sectionsHTML = WAIVER_POSITIONS.filter(pos => groups[pos].length).map(pos => {
+      const top = groups[pos].slice(0, 8);
+      return `
+        <div style="margin-bottom:22px;">
+          <div class="roster-group-title">${pos}</div>
+          <div class="roster-list">
+            ${top.map(p => `
+              <div class="player-row">
+                <div class="slot-tag ${slotColorClass(pos)}">${pos}</div>
+                <div class="player-name ${nameColorClass(pos)}">${playerNameHTML(p)}</div>
+                <div class="player-meta">${p.team}${p.proj!=null ? ` · <span style="color:var(--gold);">Proj ${p.proj.toFixed(1)}</span>` : ''}${p.adds ? ` · +${p.adds} adds (48h)` : ''}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    const projNote = proj
+      ? `Ranked by Week ${proj.week} (${proj.season}) projections, scored to match this league's format — Sleeper-wide waiver-add counts from the last 48 hours are shown alongside for context.`
+      : `Projections didn't load this session, so this is ranked by Sleeper-wide waiver-add counts from the last 48 hours instead.`;
+
+    return `
+      <div class="empty-note" style="margin-bottom:16px;">
+        ${projNote} Points are calculated from the raw projected stat line using this league's exact scoring settings, the same way Sleeper's own app does it. Projections themselves come from an undocumented Sleeper endpoint though (not part of their official API), and update on their own schedule — so if a number still looks off versus the Sleeper app, it's most likely the underlying projection having refreshed since this session loaded, not the scoring math. Players already rostered in this league are excluded.
+      </div>
+      ${sectionsHTML || '<div style="color:var(--chalk-faint); font-size:13px; padding:8px 2px;">No waiver candidates found.</div>'}
+    `;
+  }
+
+  function renderRostersTab(detail){
+    const standings = computeStandings(detail.rosters, detail.usersById);
+    if(!state.currentTeamRosterId){
+      state.currentTeamRosterId = detail.myRosterId || (standings[0] && standings[0].roster_id);
+    }
+    const chips = standings.map(row => {
+      const u = row.user;
+      const active = row.roster_id === state.currentTeamRosterId;
+      return `
+        <div class="team-chip ${active?'active':''}" data-roster="${row.roster_id}">
+          ${avatarHTML(u&&u.avatar, u&&u.display_name, 22)}
+          <span class="team-chip-name">${teamDisplayName(u, row.raw)}${row.roster_id===detail.myRosterId?' ★':''}</span>
+        </div>
+      `;
+    }).join('');
+
+    const roster = detail.rosters.find(r => r.roster_id === state.currentTeamRosterId);
+    const rosterGroupsHTML = roster ? renderRosterGroups(roster, detail.league) : '<p style="color:var(--chalk-dim);">Select a team.</p>';
+    const proj = state.projectionsCache;
+
+    return `
+      <div class="team-picker">${chips}</div>
+      ${proj ? `<div class="empty-note" style="margin-bottom:14px;">Projections shown are for <strong>Week ${proj.week}, ${proj.season} regular season</strong> — check this matches what you're comparing against in the Sleeper app.</div>` : `<div class="empty-note" style="margin-bottom:14px;">Projections didn't load this session — showing rosters without them.</div>`}
+      <div id="roster-groups">${rosterGroupsHTML}</div>
+    `;
+  }
+
+  const SLOT_LABELS = {
+    'WRRB_FLEX':'WR/RB',
+    'REC_FLEX':'WR/TE',
+    'SUPER_FLEX':'SFLEX',
+  };
+  function slotLabel(slot){ return SLOT_LABELS[slot] || slot; }
+  function slotColorClass(slot){
+    if(slot === 'QB' || slot === 'SUPER_FLEX') return 'tag-red';
+    if(slot === 'RB') return 'tag-green';
+    if(slot === 'WR') return 'tag-blue';
+    if(slot === 'TE') return 'tag-orange';
+    if(slot === 'K') return 'tag-purple';
+    if(slot === 'DEF') return 'tag-brown';
+    if(slot === 'FLEX') return 'tag-mix-flex';
+    if(slot === 'WRRB_FLEX') return 'tag-mix-wrrb';
+    if(slot === 'REC_FLEX') return 'tag-mix-wrte';
+    return '';
+  }
+
+  // 2026 NFL regular-season bye weeks by team (source: league schedule release, May 2026).
+  // Static because byes are fixed once the schedule is out — not available on Sleeper's player endpoint.
+  const BYE_WEEKS = {
+    KC:5, CAR:5,
+    MIA:6, CIN:6, DET:6, MIN:6,
+    BUF:7, LAC:7, WAS:7, JAX:7,
+    NYG:8, NO:8, SF:8, HOU:8,
+    TEN:9, PIT:9,
+    DEN:10, PHI:10, CHI:10, TB:10,
+    NE:11, CLE:11, SEA:11, GB:11, ATL:11, LAR:11,
+    IND:13, NYJ:13, LV:13, BAL:13,
+    DAL:14, ARI:14,
+  };
+
+  // Full 2026 regular-season schedule (opponent per week), transcribed from a
+  // user-supplied schedule image. An automated self-consistency check (does
+  // each team's claimed opponent match up with that opponent's own row) found
+  // the home/away flag was unreliable in roughly 30% of games, so it is NOT
+  // used or displayed anywhere — only the opponent identity is shown, which
+  // checked out reliably. The one opponent-identity conflict found (Kansas
+  // City / New Orleans / NY Jets, Week 9) was resolved by cross-referencing
+  // Cleveland's independently-consistent row.
+  // Format: TEAM: [[opp, _unused], ... 18 entries] or null for a bye week.
+  const SCHEDULE_2026 = {
+    ARI: [['LAC',0],['SEA',1],['SF',0],['NYG',0],['DET',1],['LAR',0],['DEN',1],['DAL',0],['SEA',0],['LAR',1],['KC',0],['WAS',1],['PHI',1],null,['NYJ',1],['NO',0],['LV',1],['SF',1]],
+    ATL: [['PIT',0],['CAR',1],['GB',0],['NO',0],['BAL',1],['CHI',1],['SF',1],['TB',1],['CIN',1],['KC',1],null,['MIN',0],['DET',1],['CLE',0],['WAS',1],['TB',1],['NO',1],['CAR',0]],
+    BAL: [['IND',0],['NO',1],['DAL',0],['TEN',1],['ATL',0],['CLE',0],['CIN',1],['BUF',0],['JAX',1],['LAC',1],['CAR',0],['HOU',0],null,['TB',1],['PIT',0],['CLE',1],['CIN',0],['PIT',1]],
+    BUF: [['HOU',0],['DET',1],['LAC',1],['NE',1],['LAR',0],['LV',0],null,['BAL',1],['MIN',0],['NYJ',1],['MIA',1],['KC',0],['NE',0],['GB',0],['CHI',0],['DEN',0],['MIA',1],['NYJ',1]],
+    CAR: [['CHI',1],['ATL',0],['CLE',0],['DET',1],null,['PHI',0],['TB',1],['GB',1],['DEN',1],['NO',0],['BAL',1],['TB',0],['MIN',0],['NO',1],['CIN',1],['PIT',0],['SEA',1],['ATL',1]],
+    CHI: [['CAR',0],['MIN',1],['PHI',1],['NYJ',1],['GB',0],['ATL',0],['NE',1],['SEA',1],['TB',1],null,['NO',1],['DET',0],['JAX',1],['MIA',0],['BUF',0],['GB',1],['DET',1],['MIN',0]],
+    CIN: [['TB',1],['HOU',0],['PIT',0],['JAX',1],['MIA',0],null,['BAL',0],['TEN',1],['ATL',0],['PIT',1],['WAS',0],['NO',1],['CLE',0],['KC',0],['CAR',1],['IND',0],['BAL',1],['CLE',1]],
+    CLE: [['JAX',0],['TB',0],['CAR',1],['PIT',1],['NYJ',0],['BAL',1],['TEN',0],['PIT',0],['NO',0],['HOU',1],null,['LV',1],['CIN',1],['ATL',0],['NYG',1],['BAL',0],['IND',1],['CIN',0]],
+    DAL: [['NYG',0],['WAS',1],['BAL',1],['HOU',0],['TB',1],['GB',0],['PHI',0],['ARI',1],['IND',0],['SF',1],['TEN',1],['PHI',1],['SEA',0],null,['LAR',0],['JAX',1],['NYG',1],['WAS',0]],
+    DEN: [['KC',0],['JAX',1],['LAR',1],['SF',0],['LAC',0],['SEA',1],['ARI',0],['KC',1],['CAR',0],null,['LV',1],['PIT',0],['MIA',1],['NYJ',0],['LV',0],['BUF',0],['NE',0],['LAC',1]],
+    DET: [['NO',1],['BUF',0],['NYJ',1],['CAR',0],['ARI',0],null,['GB',1],['MIN',1],['MIA',1],['NE',1],['TB',1],['CHI',0],['ATL',0],['TEN',1],['MIN',1],['NYG',1],['CHI',0],['GB',1]],
+    GB: [['MIN',0],['NYJ',0],['ATL',1],['TB',0],['CHI',1],['DAL',1],['DET',0],['CAR',1],['NE',0],['MIN',1],null,['LAR',1],['NO',0],['BUF',1],['MIA',1],['CHI',0],['HOU',1],['DET',0]],
+    HOU: [['BUF',1],['CIN',1],['IND',0],['DAL',1],['TEN',0],['JAX',0],['NYG',1],null,['LAC',0],['CLE',0],['IND',1],['BAL',1],['PIT',0],['WAS',0],['JAX',1],['PHI',0],['GB',0],['TEN',1]],
+    IND: [['BAL',1],['KC',0],['HOU',1],['WAS',0],['PIT',0],['TEN',1],['MIN',0],['JAX',1],['DAL',1],['MIA',1],['HOU',0],['NYG',1],null,['PHI',1],['TEN',0],['CIN',1],['CLE',0],['JAX',1]],
+    JAX: [['CLE',1],['DEN',0],['NE',1],['CIN',0],['PHI',1],['HOU',1],null,['IND',1],['BAL',0],['TEN',0],['NYG',0],['TEN',1],['CHI',0],['PIT',1],['HOU',0],['DAL',0],['WAS',1],['IND',0]],
+    KC: [['DEN',1],['IND',1],['MIA',0],['LV',0],null,['LAC',1],['SEA',0],['DEN',0],['NYJ',1],['ATL',0],['ARI',1],['BUF',0],['LAR',1],['CIN',0],['NE',1],['SF',1],['LAC',0],['LV',1]],
+    LAC: [['ARI',1],['LV',1],['BUF',0],['SEA',0],['DEN',1],['KC',0],null,['LAR',1],['HOU',1],['BAL',0],['NYJ',1],['NE',1],['TB',0],['LV',0],['SF',1],['MIA',1],['KC',1],['DEN',0]],
+    LAR: [['SF',1],['NYG',1],['DEN',0],['PHI',0],['BUF',1],['ARI',1],['LV',0],['LAC',1],['WAS',0],['ARI',0],null,['GB',1],['KC',1],['SF',0],['DAL',1],['SEA',0],['TB',0],['SEA',1]],
+    LV: [['MIA',1],['LAC',0],['NO',0],['KC',1],['NE',0],['BUF',1],['LAR',1],['NYJ',1],['SF',0],['SEA',1],['DEN',0],['CLE',0],null,['LAC',1],['DEN',1],['TEN',1],['ARI',0],['KC',0]],
+    MIA: [['LV',0],['SF',0],['KC',1],['MIN',0],['CIN',1],null,['NYJ',0],['NE',1],['DET',1],['IND',1],['BUF',1],['NYJ',1],['DEN',1],['CHI',1],['GB',1],['LAC',1],['BUF',1],['NE',0]],
+    MIN: [['GB',1],['CHI',0],['TB',0],['MIA',1],['NO',0],null,['IND',1],['DET',0],['BUF',1],['GB',1],['SF',0],['ATL',1],['CAR',0],['NE',1],['DET',0],['WAS',1],['NYJ',0],['CHI',1]],
+    NE: [['SEA',0],['PIT',1],['JAX',1],['BUF',0],['LV',1],['NYJ',1],['CHI',0],['MIA',1],['GB',1],['DET',0],null,['LAC',0],['BUF',1],['MIN',1],['KC',0],['NYJ',0],['DEN',1],['MIA',1]],
+    NO: [['DET',0],['BAL',0],['LV',1],['ATL',1],['MIN',1],['NYG',0],['PIT',1],null,['CLE',1],['CAR',1],['CHI',0],['CIN',0],['GB',1],['CAR',0],['TB',0],['ARI',1],['ATL',0],['TB',1]],
+    NYG: [['DAL',1],['LAR',0],['TEN',1],['ARI',1],['WAS',0],['NO',1],['HOU',0],null,['PHI',0],['WAS',1],['JAX',1],['IND',0],['SF',1],['SEA',0],['CLE',1],['DET',1],['DAL',0],['PHI',1]],
+    NYJ: [['TEN',0],['GB',1],['DET',0],['CHI',0],['CLE',1],['NE',0],['MIA',1],['LV',1],['KC',0],['BUF',1],['LAC',0],['MIA',1],null,['DEN',1],['ARI',0],['NE',1],['MIN',1],['BUF',0]],
+    PHI: [['WAS',1],['TEN',1],['CHI',0],['LAR',1],['JAX',0],['CAR',1],['DAL',1],['WAS',0],['NYG',1],null,['PIT',1],['DAL',0],['ARI',0],['IND',1],['SEA',0],['HOU',0],['SF',0],['NYG',0]],
+    PIT: [['ATL',1],['NE',0],['CIN',1],['CLE',0],['IND',1],['TB',0],['NO',0],['CLE',1],null,['CIN',0],['PHI',0],['DEN',1],['HOU',1],['JAX',1],['BAL',1],['CAR',1],['TEN',0],['BAL',0]],
+    SEA: [['NE',1],['ARI',0],['WAS',0],['LAC',1],['SF',1],['DEN',0],['KC',1],['CHI',0],['ARI',1],['LV',0],null,['SF',0],['DAL',1],['NYG',1],['PHI',1],['LAR',1],['CAR',0],['LAR',0]],
+    SF: [['LAR',0],['MIA',1],['ARI',1],['DEN',1],['SEA',0],['WAS',1],['ATL',1],null,['LV',1],['DAL',0],['MIN',1],['SEA',1],['NYG',0],['LAR',1],['LAC',0],['KC',1],['PHI',1],['ARI',0]],
+    TB: [['CIN',0],['CLE',0],['MIN',1],['GB',1],['DAL',0],['PIT',1],['CAR',0],['ATL',1],['CHI',0],null,['DET',0],['CAR',1],['LAC',1],['BAL',0],['NO',1],['ATL',1],['LAR',1],['NO',0]],
+    TEN: [['NYJ',1],['PHI',1],['NYG',0],['BAL',0],['HOU',1],['IND',1],['CLE',1],['CIN',0],null,['JAX',1],['DAL',0],['JAX',0],['WAS',1],['DET',0],['IND',1],['LV',0],['PIT',1],['HOU',0]],
+    WAS: [['PHI',0],['DAL',0],['SEA',1],['IND',1],['NYG',1],['SF',0],null,['PHI',1],['LAR',1],['NYG',0],['CIN',1],['ARI',0],['TEN',0],['HOU',1],['ATL',1],['MIN',0],['JAX',0],['DAL',1]],
+  };
+  function getMatchup(teamAbbr, week){
+    const row = SCHEDULE_2026[teamAbbr];
+    if(!row) return null;
+    const entry = row[week-1];
+    if(entry === null || entry === undefined) return null; // bye
+    return {opp: entry[0]};
+  }
+
+  function nameColorClass(pos){
+    if(pos === 'QB') return 'name-red';
+    if(pos === 'TE') return 'name-orange';
+    if(pos === 'WR') return 'name-blue';
+    if(pos === 'RB') return 'name-green';
+    return '';
+  }
+
+  function playerLabel(pid){
+    if(!pid) return null;
+    const p = state.playersCache ? state.playersCache[pid] : null;
+    if(p){
+      const name = p.full_name || ((p.first_name||'') + ' ' + (p.last_name||'')).trim() || pid;
+      const team = p.team||'FA';
+      return {name, pos: p.position||'', team, bye: BYE_WEEKS[team] || null};
+    }
+    // Defense entries use team abbreviation as the id
+    if(pid.length <= 3){
+      return {name: pid + ' D/ST', pos:'DEF', team: pid, bye: BYE_WEEKS[pid] || null};
+    }
+    return {name: pid, pos:'', team:'', bye:null};
+  }
+
+  function playerNameHTML(info){
+    return info.name + (info.bye ? ` <span class="bye-tag">(Bye ${info.bye})</span>` : '');
+  }
+
+  // Which actual positions can fill each roster slot.
+  const SLOT_ELIGIBILITY = {
+    QB:['QB'], RB:['RB'], WR:['WR'], TE:['TE'], K:['K'], DEF:['DEF'],
+    FLEX:['RB','WR','TE'], WRRB_FLEX:['WR','RB'], REC_FLEX:['WR','TE'],
+    SUPER_FLEX:['QB','RB','WR','TE'],
+  };
+
+  // Greedy best-lineup solver: fills the most restrictive slots (single position)
+  // first, then narrower flex slots, then the widest flex (SUPER_FLEX) last, each
+  // time taking the highest-projected eligible player not already used elsewhere
+  // in the lineup. This matches how these lineups are optimized in practice —
+  // it isn't a formal solver, but gets the right answer in the vast majority of
+  // real rosters.
+  function greedyAssignLineup(pool, slotOrder){
+    const breadth = slot => (SLOT_ELIGIBILITY[slot] ? SLOT_ELIGIBILITY[slot].length : 1);
+    const order = slotOrder.map((slot, i) => ({slot, i})).sort((a,b) => breadth(a.slot) - breadth(b.slot) || a.i - b.i);
+    const used = new Set();
+    const assignment = new Array(slotOrder.length).fill(null);
+    order.forEach(({slot, i}) => {
+      const eligible = SLOT_ELIGIBILITY[slot] || [slot];
+      let best = null;
+      pool.forEach(p => {
+        if(used.has(p.pid)) return;
+        if(!eligible.includes(p.pos)) return;
+        if(!best || p.proj > best.proj) best = p;
+      });
+      if(best){ used.add(best.pid); assignment[i] = best.pid; }
+    });
+    return assignment;
+  }
+
+  function computeOptimalLineup(roster, league){
+    const excluded = new Set([...(roster.reserve||[]), ...(roster.taxi||[])]);
+    const pool = (roster.players || []).filter(pid => !excluded.has(pid)).map(pid => {
+      const info = playerLabel(pid);
+      const rawProj = projectedPoints(pid, league);
+      return {pid, pos: info ? info.pos : null, proj: rawProj == null ? -1 : rawProj, hasProj: rawProj != null, info};
+    });
+    const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
+    const assignment = greedyAssignLineup(pool, slotOrder);
+    return {slotOrder, assignment, pool};
+  }
+
+  // Same optimizer, but for the Season Planner: takes a plain list of player
+  // ids (which may include hypothetical waiver adds not on the real Sleeper
+  // roster) and a specific week's projections, rather than a real roster object.
+  function computePlannerLineup(pids, league, week){
+    const pool = pids.map(pid => {
+      const info = playerLabel(pid);
+      const rawProj = plannerProjectedPoints(pid, league, week);
+      return {pid, pos: info ? info.pos : null, proj: rawProj == null ? -1 : rawProj, hasProj: rawProj != null, info};
+    });
+    const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
+    const assignment = greedyAssignLineup(pool, slotOrder);
+    return {slotOrder, assignment, pool};
+  }
+
+  function median(arr){
+    if(!arr.length) return null;
+    const sorted = [...arr].sort((a,b) => a-b);
+    const mid = Math.floor(sorted.length/2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
+  }
+
+  function lineupTotal(assignment, pool){
+    return assignment.reduce((sum, pid) => {
+      if(!pid) return sum;
+      const p = pool.find(x => x.pid === pid);
+      return sum + (p && p.hasProj ? p.proj : 0);
+    }, 0);
+  }
+
+  function projMetaHTML(pid, league){
+    const p = projectedPoints(pid, league);
+    return p != null ? ` · <span style="color:var(--gold);">Proj ${p.toFixed(1)}</span>` : '';
+  }
+
+  // Shared row template for starters/bench/IR — avoids three near-identical
+  // copies of the same markup.
+  function rosterPlayerRow(pid, slotTagHTML, league){
+    const info = playerLabel(pid);
+    const name = info ? playerNameHTML(info) : (pid || '<span style="color:var(--chalk-faint)">Empty</span>');
+    const meta = info ? (info.pos + ' · ' + info.team + projMetaHTML(pid, league)) : '';
+    return `
+      <div class="player-row">
+        ${slotTagHTML}
+        <div class="player-name ${info?nameColorClass(info.pos):''}">${name}</div>
+        <div class="player-meta">${meta}</div>
+      </div>
+    `;
+  }
+
+  function renderRosterGroups(roster, league){
+    const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
+    const starters = roster.starters || [];
+    const startersHTML = slotOrder.map((slot, i) => {
+      const pid = starters[i];
+      const tag = `<div class="slot-tag ${slotColorClass(slot)}">${slotLabel(slot)}</div>`;
+      return rosterPlayerRow(pid, tag, league);
+    }).join('');
+
+    const allPlayers = roster.players || [];
+    const benchIds = allPlayers.filter(pid => !starters.includes(pid) && !(roster.reserve||[]).includes(pid) && !(roster.taxi||[]).includes(pid));
+    const benchHTML = benchIds.map(pid => rosterPlayerRow(pid, '<div class="slot-tag tag-grey">BN</div>', league)).join('')
+      || '<div style="color:var(--chalk-faint); font-size:12px; padding:6px 2px;">No bench players.</div>';
+
+    const irIds = [...(roster.reserve||[]), ...(roster.taxi||[])];
+    const irTag = '<div class="slot-tag" style="color:var(--alert); background:rgba(193,68,14,0.1);">IR</div>';
+    const irHTML = irIds.length ? irIds.map(pid => rosterPlayerRow(pid, irTag, league)).join('') : '';
+
+    return `
+      <div class="roster-groups">
+        <div>
+          <div class="roster-group-title">Starters</div>
+          <div class="roster-list">${startersHTML}</div>
+        </div>
+        <div>
+          <div class="roster-group-title">Bench</div>
+          <div class="roster-list">${benchHTML}</div>
+        </div>
+        ${irIds.length ? `<div>
+          <div class="roster-group-title">IR / Taxi</div>
+          <div class="roster-list">${irHTML}</div>
+        </div>` : ''}
+      </div>
+    `;
+  }
+
+  function bindRosterPicker(detail){
+    document.querySelectorAll('.team-chip').forEach(chip => {
+      chip.addEventListener('click', ()=>{
+        state.currentTeamRosterId = parseInt(chip.dataset.roster, 10);
+        const rg = document.getElementById('roster-groups');
+        const roster = detail.rosters.find(r => r.roster_id === state.currentTeamRosterId);
+        rg.innerHTML = roster ? renderRosterGroups(roster, detail.league) : '';
+        document.querySelectorAll('.team-chip').forEach(c=>c.classList.remove('active'));
+        chip.classList.add('active');
+      });
+    });
+  }
+
+  function currencySymbol(cur){
+    return cur === 'GBP' ? '£' : '$';
+  }
+
+  function renderPayoutsTab(detail, leagueName){
+    const numTeams = detail.rosters.length;
+    const payout = detail.payout || {
+      buyIn:'', currency:'USD', payouts:[{place:'1st', amount:''}], notes:'',
+      advanceDues: {paid:false, throughSeason:''},
+      empirePot: {enabled:false, contribution:'', total:'', leaderName:'', consecutiveWins:''}
+    };
+    const currency = payout.currency || 'USD';
+    const sym = currencySymbol(currency);
+    const advance = payout.advanceDues || {paid:false, throughSeason:''};
+    const empire = payout.empirePot || {enabled:false, contribution:'', total:'', leaderName:'', consecutiveWins:''};
+    const dynasty = isDynastyLeague(leagueName);
+    const rowsHTML = payout.payouts.map((p, i) => `
+      <div class="payout-row" data-idx="${i}">
+        <input class="place-input" type="text" placeholder="e.g. 1st" value="${p.place||''}" data-field="place"/>
+        <input class="amount-input" type="number" placeholder="amount" value="${p.amount!==''&&p.amount!=null?p.amount:''}" data-field="amount"/>
+        <button class="btn-danger-ghost" data-remove="${i}">Remove</button>
+      </div>
+    `).join('');
+
+    return `
+      <div class="payout-card">
+        <div style="display:flex; gap:12px;">
+          <div class="field" style="flex:1;">
+            <label>Buy-in per team</label>
+            <input id="buyin-input" type="number" placeholder="amount" value="${payout.buyIn!==''&&payout.buyIn!=null?payout.buyIn:''}"/>
+          </div>
+          <div class="field" style="width:110px;">
+            <label>Currency</label>
+            <select id="currency-input">
+              <option value="USD" ${currency==='USD'?'selected':''}>USD ($)</option>
+              <option value="GBP" ${currency==='GBP'?'selected':''}>GBP (£)</option>
+            </select>
+          </div>
+        </div>
+        <div class="section-title" style="margin-top:18px;">Payout Structure</div>
+        <div id="payout-rows">${rowsHTML}</div>
+        <button class="btn btn-ghost" id="btn-add-row" style="margin-top:8px;">+ Add Place</button>
+        <div class="pot-summary" id="pot-summary"></div>
+        <button class="btn btn-primary" id="btn-save-payout" style="margin-top:16px; width:100%;">Save</button>
+        <div class="empty-note">${numTeams} teams in this league. Saved locally to your account — Sleeper doesn't track buy-ins or payouts, so this stays with you between visits.</div>
+      </div>
+
+      ${dynasty ? `
+      <div class="payout-card" style="margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">Advance Dues</div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+          <input type="checkbox" id="advance-paid-input" ${advance.paid?'checked':''} style="width:16px; height:16px;"/>
+          I've paid next season's dues in advance for this league
+        </label>
+        <div class="field" style="margin-top:12px; max-width:180px;">
+          <label>Paid through season</label>
+          <input id="advance-season-input" type="text" placeholder="e.g. 2027" value="${advance.throughSeason||''}"/>
+        </div>
+        <div class="empty-note">For leagues that require next year's buy-in upfront to stop people bailing after a season.</div>
+      </div>
+
+      <div class="payout-card" style="margin-top:16px;">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+          <input type="checkbox" id="empire-enabled-input" ${empire.enabled?'checked':''} style="width:16px; height:16px;"/>
+          <span class="section-title" style="margin:0; border:none;">This league has an Empire Pot</span>
+        </label>
+        <div id="empire-fields" style="${empire.enabled?'':'display:none;'} margin-top:14px;">
+          <div style="display:flex; gap:12px;">
+            <div class="field" style="flex:1;">
+              <label>Annual contribution per team</label>
+              <input id="empire-contribution-input" type="number" placeholder="amount" value="${empire.contribution!==''&&empire.contribution!=null?empire.contribution:''}"/>
+            </div>
+            <div class="field" style="flex:1;">
+              <label>Current pot total</label>
+              <input id="empire-total-input" type="number" placeholder="amount" value="${empire.total!==''&&empire.total!=null?empire.total:''}"/>
+            </div>
+          </div>
+          <div style="display:flex; gap:12px;">
+            <div class="field" style="flex:1;">
+              <label>Reigning leader</label>
+              <input id="empire-leader-input" type="text" placeholder="Team or owner name" value="${empire.leaderName||''}"/>
+            </div>
+            <div class="field" style="width:150px;">
+              <label>Consecutive titles</label>
+              <input id="empire-wins-input" type="number" min="0" max="2" placeholder="0, 1 or 2" value="${empire.consecutiveWins!==''&&empire.consecutiveWins!=null?empire.consecutiveWins:''}"/>
+            </div>
+          </div>
+          <div class="empty-note">Everyone pays the same amount into this pot every year; it rolls over and grows until one team wins the league two seasons running, at which point they take the whole pot. Update the total and leader here yourself each season — this isn't something Sleeper tracks.</div>
+        </div>
+        <button class="btn btn-primary" id="btn-save-empire" style="margin-top:14px; width:100%;">Save Advance Dues &amp; Empire Pot</button>
+      </div>
+      ` : ''}
+    `;
+  }
+
+  function updatePotSummary(numTeams){
+    const buyIn = parseFloat(document.getElementById('buyin-input').value) || 0;
+    const sym = currencySymbol(document.getElementById('currency-input').value);
+    const pot = buyIn * numTeams;
+    let allocated = 0;
+    document.querySelectorAll('.payout-row').forEach(row => {
+      const amt = parseFloat(row.querySelector('[data-field="amount"]').value) || 0;
+      allocated += amt;
+    });
+    const el = document.getElementById('pot-summary');
+    const diff = pot - allocated;
+    el.innerHTML = `
+      <span>Total pot (${numTeams} × ${sym}${buyIn.toFixed(2)})</span>
+      <span class="val">${sym}${pot.toFixed(2)}</span>
+    `;
+    el.innerHTML += `<br/><span>Allocated in payouts</span><span class="val ${Math.abs(diff)<0.01?'match-ok':'mismatch'}">${sym}${allocated.toFixed(2)}${Math.abs(diff)>=0.01 ? (diff>0? '  (short '+sym+diff.toFixed(2)+')' : '  (over '+sym+Math.abs(diff).toFixed(2)+')') : '  ✓'}</span>`;
+  }
+
+  function bindPayoutsForm(detail, leagueName){
+    const numTeams = detail.rosters.length;
+    const dynasty = isDynastyLeague(leagueName);
+    const container = document.getElementById('tab-content');
+
+    function currentPayoutsArray(){
+      return Array.from(document.querySelectorAll('.payout-row')).map(row => ({
+        place: row.querySelector('[data-field="place"]').value,
+        amount: row.querySelector('[data-field="amount"]').value,
+      }));
+    }
+
+    function rebindRowRemovals(){
+      document.querySelectorAll('[data-remove]').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const rows = currentPayoutsArray();
+          rows.splice(parseInt(btn.dataset.remove,10),1);
+          rerenderRows(rows);
+        });
+      });
+      document.querySelectorAll('.payout-row input').forEach(inp=>{
+        inp.addEventListener('input', ()=>updatePotSummary(numTeams));
+      });
+    }
+
+    function rerenderRows(rows){
+      if(!rows.length) rows = [{place:'',amount:''}];
+      const rowsHTML = rows.map((p,i)=>`
+        <div class="payout-row" data-idx="${i}">
+          <input class="place-input" type="text" placeholder="e.g. 1st" value="${p.place||''}" data-field="place"/>
+          <input class="amount-input" type="number" placeholder="$ amount" value="${p.amount!==''&&p.amount!=null?p.amount:''}" data-field="amount"/>
+          <button class="btn-danger-ghost" data-remove="${i}">Remove</button>
+        </div>
+      `).join('');
+      document.getElementById('payout-rows').innerHTML = rowsHTML;
+      rebindRowRemovals();
+      updatePotSummary(numTeams);
+    }
+
+    rebindRowRemovals();
+    updatePotSummary(numTeams);
+    document.getElementById('buyin-input').addEventListener('input', ()=>updatePotSummary(numTeams));
+    document.getElementById('currency-input').addEventListener('change', ()=>updatePotSummary(numTeams));
+
+    document.getElementById('btn-add-row').addEventListener('click', ()=>{
+      const rows = currentPayoutsArray();
+      rows.push({place:'', amount:''});
+      rerenderRows(rows);
+    });
+
+    const empireEnabledInput = dynasty ? document.getElementById('empire-enabled-input') : null;
+    const empireFields = dynasty ? document.getElementById('empire-fields') : null;
+    if(dynasty){
+      empireEnabledInput.addEventListener('change', ()=>{
+        empireFields.style.display = empireEnabledInput.checked ? '' : 'none';
+      });
+    }
+
+    function gatherFullPayoutData(){
+      const data = {
+        buyIn: document.getElementById('buyin-input').value,
+        currency: document.getElementById('currency-input').value,
+        payouts: currentPayoutsArray(),
+        notes: '',
+      };
+      if(dynasty){
+        data.advanceDues = {
+          paid: document.getElementById('advance-paid-input').checked,
+          throughSeason: document.getElementById('advance-season-input').value,
+        };
+        data.empirePot = {
+          enabled: empireEnabledInput.checked,
+          contribution: document.getElementById('empire-contribution-input').value,
+          total: document.getElementById('empire-total-input').value,
+          leaderName: document.getElementById('empire-leader-input').value,
+          consecutiveWins: document.getElementById('empire-wins-input').value,
+        };
+      }
+      return data;
+    }
+
+    async function saveAll(){
+      const data = gatherFullPayoutData();
+      try{
+        await savePayout(state.currentLeagueId, data);
+        detail.payout = data;
+        toast('Saved');
+      }catch(e){
+        toast('Save failed — try again');
+      }
+    }
+
+    document.getElementById('btn-save-payout').addEventListener('click', saveAll);
+    if(dynasty){
+      const empireSaveBtn = document.getElementById('btn-save-empire');
+      if(empireSaveBtn) empireSaveBtn.addEventListener('click', saveAll);
+    }
+  }
+
+  // ---------------- Boot ----------------
+  async function boot(){
+    renderLoading('Starting up...');
+    const settings = await loadSettings();
+    if(settings && settings.username && settings.season){
+      state.username = settings.username;
+      state.season = settings.season;
+      renderLoading('Welcome back — loading ' + settings.username + '...');
+      try{
+        const {user, leagues} = await loadLeaguesForUser(settings.username, settings.season);
+        state.sleeperUserId = user.user_id;
+        state.leagues = leagues;
+        if(leagues.length){
+          state.view = 'leagues';
+          return render();
+        }
+      }catch(e){ /* fall through to setup */ }
+    }
+    state.view = 'setup';
+    render();
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

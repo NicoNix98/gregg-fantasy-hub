@@ -1,0 +1,1046 @@
+  function paintLeagueList(cards, groups){
+    const activeGroup = groups.find(g => g.category === state.leaguesSubTab) || {items:[]};
+    app.innerHTML = `
+      ${renderTopbar(false)}
+      <div class="body-scroll">
+        <div class="tabs">
+          ${groups.map(g => `<div class="tab ${g.category===state.leaguesSubTab?'active':''}" data-cat="${g.category}">${g.category} <span style="opacity:0.6;">(${g.items.length})</span></div>`).join('')}
+        </div>
+        <div class="league-grid">
+          ${activeGroup.items.map(c => renderLeagueCard(c)).join('')}
+        </div>
+      </div>
+    `;
+    bindTopbar();
+    app.querySelectorAll('.tab').forEach(t => t.addEventListener('click', ()=>{
+      state.leaguesSubTab = t.dataset.cat;
+      paintLeagueList(cards, groups);
+    }));
+    cards.forEach(c=>{
+      if(c.error) return;
+      const el = document.getElementById('card-' + c.lg.league_id);
+      if(el) el.addEventListener('click', ()=>{
+        state.currentLeagueId = c.lg.league_id;
+        state.currentTab = 'standings';
+        state.currentTeamRosterId = null;
+        state.view = 'league';
+        render();
+      });
+    });
+  }
+
+  function renderLeagueCard({lg, detail, standings, myIdx, error}){
+    if(error){
+      return `<div class="league-card" style="border-left-color:var(--alert);">
+        <div class="league-card-name">${lg.name}</div>
+        <div class="league-card-meta" style="color:#E08A63;">Couldn't load — ${error}</div>
+      </div>`;
+    }
+    const me = myIdx >= 0 ? standings[myIdx] : null;
+    const record = me ? `${me.wins}-${me.losses}${me.ties?('-'+me.ties):''}` : '—';
+    const rank = myIdx >= 0 ? (myIdx+1) : '—';
+    const total = standings.length;
+    const winClass = me && me.wins >= me.losses ? 'win' : 'loss';
+    const guillotine = isGuillotineLeague(lg.name);
+    return `
+      <div class="league-card" id="card-${lg.league_id}">
+        <div class="league-card-name">${lg.name}</div>
+        <div class="league-card-meta">${total} teams · ${lg.status}</div>
+        <div class="league-card-row">
+          <div>
+            <div class="league-card-label">Your Record</div>
+            <div class="scoreboard-num ${winClass}">${record}</div>
+          </div>
+          ${guillotine ? '' : `
+          <div style="text-align:right;">
+            <div class="league-card-label">Rank</div>
+            <div class="scoreboard-num">${rank}<span style="font-size:14px; color:var(--chalk-faint);">/${total}</span></div>
+          </div>`}
+        </div>
+      </div>
+    `;
+  }
+
+  async function renderOverview(){
+    renderLoading('Pulling buy-ins and standings...');
+    const rows = [];
+    let totalUSD = 0;
+    let totalGBP = 0;
+    let leaguesWithBuyIn = 0;
+    for(const lg of state.leagues){
+      try{
+        let detail = state.leagueDetail[lg.league_id];
+        if(!detail){
+          detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
+          state.leagueDetail[lg.league_id] = detail;
+        }
+        const standings = computeStandings(detail.rosters, detail.usersById);
+        const myIdx = standings.findIndex(r => r.roster_id === detail.myRosterId);
+        const total = standings.length;
+        const playoffTeams = (detail.league.settings && detail.league.settings.playoff_teams) || 0;
+        const rank = myIdx >= 0 ? myIdx+1 : null;
+        const inPlayoffs = playoffTeams > 0 && rank !== null && rank <= playoffTeams;
+        const payout = detail.payout;
+        const hasBuyIn = payout && payout.buyIn !== '' && payout.buyIn != null;
+        const buyIn = hasBuyIn ? (parseFloat(payout.buyIn)||0) : 0;
+        const currency = (payout && payout.currency) || 'USD';
+        if(hasBuyIn){
+          leaguesWithBuyIn++;
+          if(currency === 'GBP') totalGBP += buyIn; else totalUSD += buyIn;
+        }
+        rows.push({lg, rank, total, playoffTeams, inPlayoffs, payout, buyIn});
+      }catch(e){
+        rows.push({lg, error: e.message || 'Failed to load'});
+      }
+    }
+
+    const groups = groupByCategory(rows, r => r.lg.name);
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <div class="section-title">Buy-ins &amp; Standings Overview</div>
+        <div class="overview-summary">
+          <div class="overview-summary-item">
+            <div class="overview-summary-label">Total Buy-in — USD (${leaguesWithBuyIn} leagues w/ buy-in)</div>
+            <div class="overview-summary-val">$${totalUSD.toFixed(2)}</div>
+          </div>
+          <div class="overview-summary-item">
+            <div class="overview-summary-label">Total Buy-in — GBP</div>
+            <div class="overview-summary-val">£${totalGBP.toFixed(2)}</div>
+          </div>
+        </div>
+        <div class="empty-note" style="margin-bottom:18px;">Shown separately rather than combined — converting between currencies would need a live exchange rate this app doesn't have, so USD and GBP totals are kept apart rather than guessed at.</div>
+        ${groups.map(g => `
+          <div class="section-title">${g.category} <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${g.items.length})</span></div>
+          <div class="overview-list" style="margin-bottom:26px;">
+            ${g.items.map(renderOverviewRow).join('')}
+          </div>
+        `).join('')}
+      </div>
+    `;
+    bindTopbar();
+    rows.forEach(r => {
+      if(r.error) return;
+      const el = document.getElementById('ov-' + r.lg.league_id);
+      if(el) el.addEventListener('click', ()=>{
+        state.currentLeagueId = r.lg.league_id;
+        state.currentTab = 'payouts';
+        state.view = 'league';
+        render();
+      });
+    });
+  }
+
+  function isGuillotineLeague(name){
+    return categoryForLeagueName(name) === 'Guillotine Leagues';
+  }
+  function isDynastyLeague(name){
+    return categoryForLeagueName(name) === 'Dynasty Leagues';
+  }
+
+  function renderOverviewRow(r){
+    if(r.error){
+      return `
+        <div class="overview-row" style="border-left-color:var(--alert);">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:#E08A63; font-size:12px;">Couldn't load — ${r.error}</div>
+          </div>
+        </div>
+      `;
+    }
+    const free = isFreeLeague(r.lg.name);
+    const sym = currencySymbol(r.payout && r.payout.currency);
+    const hasPayoutRows = r.payout && r.payout.payouts && r.payout.payouts.some(p => p.place || p.amount);
+    const payoutsText = hasPayoutRows
+      ? r.payout.payouts.filter(p => p.place || p.amount).map(p => `${p.place || '—'}: ${sym}${(parseFloat(p.amount)||0).toFixed(0)}`).join(' · ')
+      : 'No payout structure entered yet';
+    const hasBuyIn = r.payout && r.payout.buyIn !== '' && r.payout.buyIn != null;
+    const guillotine = isGuillotineLeague(r.lg.name);
+    const advance = isDynastyLeague(r.lg.name) ? (r.payout && r.payout.advanceDues) : null;
+    const empire = isDynastyLeague(r.lg.name) ? (r.payout && r.payout.empirePot) : null;
+    const extraLines = [];
+    if(advance && advance.paid){
+      extraLines.push(`<span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">✓ Advance dues paid${advance.throughSeason ? ' ('+advance.throughSeason+')' : ''}</span>`);
+    }
+    if(empire && empire.enabled){
+      const total = empire.total !== '' && empire.total != null ? parseFloat(empire.total).toFixed(2) : '—';
+      const wins = empire.consecutiveWins !== '' && empire.consecutiveWins != null ? empire.consecutiveWins : '0';
+      extraLines.push(`<span class="pill" style="background:rgba(212,160,23,0.15); color:var(--gold);">👑 Empire Pot: ${sym}${total}${empire.leaderName ? ' — '+empire.leaderName+' ('+wins+'/2 titles)' : ''}</span>`);
+    }
+    const buyInHTML = hasBuyIn
+      ? ('Buy-in: <strong style="color:var(--gold);">'+sym+parseFloat(r.payout.buyIn).toFixed(2)+'</strong>')
+      : '<span style="color:var(--chalk-faint);">Buy-in not set</span>';
+    const payoutsHTML = hasPayoutRows
+      ? `<span style="color:var(--gold);">${payoutsText}</span>`
+      : `<span style="color:var(--chalk-faint);">${payoutsText}</span>`;
+    return `
+      <div class="overview-row" id="ov-${r.lg.league_id}">
+        <div class="overview-main">
+          <div class="overview-league-name">${r.lg.name}</div>
+          <div class="overview-payouts">
+            ${free
+              ? '<span style="color:var(--chalk-faint);">Free league — no buy-in</span>'
+              : buyInHTML + ' &nbsp;·&nbsp; ' + payoutsHTML}
+          </div>
+          ${extraLines.length ? `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${extraLines.join('')}</div>` : ''}
+        </div>
+        ${guillotine ? '' : `
+        <div class="overview-stat">
+          <div class="overview-stat-label">Rank</div>
+          <div class="scoreboard-num">${r.rank || '—'}<span style="font-size:13px; color:var(--chalk-faint);">/${r.total}</span></div>
+        </div>
+        <div class="overview-stat">
+          <div class="overview-stat-label">Playoffs (top ${r.playoffTeams || '—'})</div>
+          <span class="pill ${r.inPlayoffs ? '' : 'pill-out'}">${r.inPlayoffs ? 'In the hunt' : 'Outside the line'}</span>
+        </div>`}
+      </div>
+    `;
+  }
+
+  async function renderMatchupsOverview(){
+    renderLoading('Pulling Week ' + getProjectionWeek() + ' matchups...');
+    await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+    const rows = [];
+    const guillotineRows = [];
+    for(const lg of state.leagues){
+      try{
+        let detail = state.leagueDetail[lg.league_id];
+        if(!detail){
+          detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
+          state.leagueDetail[lg.league_id] = detail;
+        }
+
+        if(isGuillotineLeague(lg.name)){
+          if(!isDraftComplete(detail)){
+            guillotineRows.push({lg, notDrafted:true});
+            continue;
+          }
+          const cutSet = new Set(detail.cutRosters || []);
+          if(cutSet.has(detail.myRosterId)){
+            guillotineRows.push({lg, cut:true});
+            continue;
+          }
+          const aliveRosters = detail.rosters.filter(r => !cutSet.has(r.roster_id));
+          const aliveTotals = aliveRosters.map(r => {
+            const opt = computeOptimalLineup(r, detail.league);
+            return {roster_id: r.roster_id, total: lineupTotal(opt.assignment, opt.pool)};
+          }).sort((a,b) => b.total - a.total);
+          const myEntry = aliveTotals.find(t => t.roster_id === detail.myRosterId);
+          if(!myEntry){
+            guillotineRows.push({lg, error: "Couldn't find your team in this league"});
+            continue;
+          }
+          const rank = aliveTotals.findIndex(t => t.roster_id === detail.myRosterId) + 1;
+          guillotineRows.push({lg, myTotal: myEntry.total, rank, aliveCount: aliveTotals.length});
+          continue;
+        }
+
+        if(!detail.matchupsWeek1){
+          try{
+            detail.matchupsWeek1 = await fetchJSON(`https://api.sleeper.app/v1/league/${lg.league_id}/matchups/${getProjectionWeek()}`);
+          }catch(e){
+            detail.matchupsWeek1 = [];
+          }
+        }
+        const pair = findMatchupPair(detail);
+        if(!pair || !pair.opp){
+          rows.push({lg, notScheduled: true});
+          continue;
+        }
+        const myRoster = detail.rosters.find(r => r.roster_id === pair.mine.roster_id);
+        const oppRoster = detail.rosters.find(r => r.roster_id === pair.opp.roster_id);
+        const oppUser = detail.usersById[oppRoster.owner_id];
+        const myOpt = computeOptimalLineup(myRoster, detail.league);
+        const oppOpt = computeOptimalLineup(oppRoster, detail.league);
+        const myTotal = lineupTotal(myOpt.assignment, myOpt.pool);
+        const oppTotal = lineupTotal(oppOpt.assignment, oppOpt.pool);
+        const allTotals = detail.rosters.map(r => {
+          const opt = computeOptimalLineup(r, detail.league);
+          return lineupTotal(opt.assignment, opt.pool);
+        });
+        const leagueMedian = median(allTotals);
+        rows.push({lg, oppName: teamDisplayName(oppUser, oppRoster), oppUser, myTotal, oppTotal, leagueMedian});
+      }catch(e){
+        if(isGuillotineLeague(lg.name)){
+          guillotineRows.push({lg, error: e.message || 'Failed to load'});
+        } else {
+          rows.push({lg, error: e.message || 'Failed to load'});
+        }
+      }
+    }
+
+    const groups = groupByCategory(rows, r => r.lg.name);
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <div class="section-title">Week ${getProjectionWeek()} Matchups</div>
+        <div class="empty-note" style="margin-bottom:18px;">Both totals are each team's best possible Week ${getProjectionWeek()} lineup based on Sleeper's projections. Green means you're currently projected ahead, red means behind. Click any matchup to open it and adjust lineups.</div>
+        ${groups.map(g => `
+          <div class="section-title">${g.category} <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${g.items.length})</span></div>
+          <div class="overview-list" style="margin-bottom:26px;">
+            ${g.items.map(renderMatchupSummaryRow).join('')}
+          </div>
+        `).join('')}
+        ${guillotineRows.length ? `
+          <div class="section-title">Guillotine Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${guillotineRows.length})</span></div>
+          <div class="empty-note" style="margin-bottom:14px;">No head-to-head opponent here — just your predicted Week ${getProjectionWeek()} score and where that ranks you among teams still in.</div>
+          <div class="overview-list" style="margin-bottom:26px;">
+            ${guillotineRows.map(renderGuillotineMatchupRow).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `;
+    bindTopbar();
+    rows.forEach(r => {
+      if(r.error || r.notScheduled) return;
+      const el = document.getElementById('mu-' + r.lg.league_id);
+      if(el) el.addEventListener('click', ()=>{
+        state.currentLeagueId = r.lg.league_id;
+        state.currentTab = 'matchup';
+        state.view = 'league';
+        render();
+      });
+    });
+    guillotineRows.forEach(r => {
+      if(r.error || r.cut) return;
+      const el = document.getElementById('mug-' + r.lg.league_id);
+      if(el) el.addEventListener('click', ()=>{
+        state.currentLeagueId = r.lg.league_id;
+        state.currentTab = 'standings';
+        state.view = 'league';
+        render();
+      });
+    });
+  }
+
+  function renderGuillotineMatchupRow(r){
+    if(r.error){
+      return `
+        <div class="overview-row" style="border-left-color:var(--alert); cursor:default;">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:#E08A63; font-size:12px;">Couldn't load — ${r.error}</div>
+          </div>
+        </div>
+      `;
+    }
+    if(r.notDrafted){
+      return `
+        <div class="overview-row" style="cursor:default;">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:var(--chalk-faint); font-size:12px;">Draft not complete yet — no score to predict</div>
+          </div>
+        </div>
+      `;
+    }
+    if(r.cut){
+      return `
+        <div class="overview-row" style="cursor:default; opacity:0.6;">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:var(--chalk-faint); font-size:12px;">You've been cut — no Week ${getProjectionWeek()} projection to show</div>
+          </div>
+        </div>
+      `;
+    }
+    const isLast = r.rank === r.aliveCount;
+    const inBottomQuarter = r.rank > r.aliveCount * 0.75;
+    const scoreColor = isLast ? '#E85C4A' : (inBottomQuarter ? '#E0A458' : '#7FBF8E');
+    return `
+      <div class="overview-row" id="mug-${r.lg.league_id}">
+        <div class="overview-main">
+          <div class="overview-league-name">${r.lg.name}</div>
+          <div class="overview-payouts">Predicted Week ${getProjectionWeek()} score</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="scoreboard-num" style="color:${scoreColor};">${r.myTotal.toFixed(1)}</div>
+          <div style="font-size:11px; color:var(--chalk-dim);">#${r.rank} (${r.aliveCount} left)</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderMatchupSummaryRow(r){
+    if(r.error){
+      return `
+        <div class="overview-row" style="border-left-color:var(--alert);">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:#E08A63; font-size:12px;">Couldn't load — ${r.error}</div>
+          </div>
+        </div>
+      `;
+    }
+    if(r.notScheduled){
+      return `
+        <div class="overview-row" style="cursor:default;">
+          <div class="overview-main">
+            <div class="overview-league-name">${r.lg.name}</div>
+            <div style="color:var(--chalk-faint); font-size:12px;">Week ${getProjectionWeek()} matchup not scheduled yet</div>
+          </div>
+        </div>
+      `;
+    }
+    const diff = r.myTotal - r.oppTotal;
+    const myColor = diff >= 0 ? '#7FBF8E' : '#E85C4A';
+    const oppColor = diff < 0 ? '#7FBF8E' : '#E85C4A';
+    return `
+      <div class="overview-row" id="mu-${r.lg.league_id}">
+        <div class="overview-main">
+          <div class="overview-league-name">${r.lg.name}</div>
+          <div class="overview-payouts">vs ${r.oppName}</div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+          <div style="display:flex; gap:18px;">
+            <div class="overview-stat">
+              <div class="overview-stat-label">You</div>
+              <div class="scoreboard-num" style="color:${myColor};">${r.myTotal.toFixed(1)}</div>
+            </div>
+            <div class="overview-stat">
+              <div class="overview-stat-label">Opponent</div>
+              <div class="scoreboard-num" style="color:${oppColor};">${r.oppTotal.toFixed(1)}</div>
+            </div>
+          </div>
+          ${r.leagueMedian != null ? `<div style="color:var(--chalk); font-size:11px;">League median: ${r.leagueMedian.toFixed(1)} pts</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function renderWaiverHub(){
+    renderLoading('Pulling waiver targets across your leagues...');
+    await Promise.all([ensurePlayersLoaded(), ensureTrendingLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+    if(!state.waiverBids) state.waiverBids = await loadWaiverBids();
+    const week = getProjectionWeek();
+    const guillotineLeagues = [];
+    const redraftLeagues = [];
+    const dynastyLeagues = [];
+    for(const lg of state.leagues){
+      const category = categoryForLeagueName(lg.name);
+      if(category === 'Redraft (Unmanaged)') continue;
+      try{
+        let detail = state.leagueDetail[lg.league_id];
+        if(!detail){ detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId); state.leagueDetail[lg.league_id] = detail; }
+        const owned = computeOwnedPlayerIds(detail);
+        const candidates = [];
+        if(state.projectionsCache){
+          Object.keys(state.projectionsCache.byPlayer).forEach(pid => {
+            if(owned.has(pid)) return;
+            const info = playerLabel(pid);
+            if(!info) return;
+            const pts = projectedPoints(pid, detail.league);
+            if(pts == null) return;
+            candidates.push({pid, info, proj: pts});
+          });
+        }
+        candidates.sort((a,b)=>b.proj-a.proj);
+        const entry = {lg, top5:candidates.slice(0,5)};
+        if(category === 'Guillotine Leagues') guillotineLeagues.push(entry);
+        else if(category === 'Dynasty Leagues') dynastyLeagues.push(entry);
+        else if(category === 'Redraft (Managed)') redraftLeagues.push(entry);
+      }catch(e){}
+    }
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <div class="section-title">Waiver Wire — Week ${week}</div>
+
+        <div class="section-title">Guillotine Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${guillotineLeagues.length})</span></div>
+        <div class="overview-list" style="margin-bottom:26px;">${guillotineLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
+
+        <div class="section-title">Redraft Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${redraftLeagues.length})</span></div>
+        <div class="overview-list" style="margin-bottom:26px;">${redraftLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
+
+        <div class="section-title">Dynasty Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${dynastyLeagues.length})</span></div>
+        <div class="overview-list" style="margin-bottom:26px;">${dynastyLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
+
+        <div class="section-title">Your Bids This Week (Week ${week})</div>
+        <div id="waiver-bids-summary">${renderWaiverBidsSummary(week)}</div>
+      </div>`;
+    bindTopbar();
+    bindWaiverHub();
+  }
+
+function renderWaiverHubLeagueCard({lg, top5, error}){
+    if(error) return '';
+    const best = top5 && top5.length ? top5[0] : null;
+    const detail = state.leagueDetail[lg.league_id];
+    const myRoster = detail ? detail.rosters.find(r=>r.roster_id===detail.myRosterId) : null;
+    const faab = detail && myRoster ? ((detail.league.settings?.waiver_budget||0) - (myRoster.settings?.waiver_budget_used||0)) : null;
+    const bids = (state.waiverBids||[]).filter(b=>b.leagueId===lg.league_id && b.week===getProjectionWeek()).length;
+    return `<div class="overview-row" id="waiver-open-${lg.league_id}">
+      <div class="overview-main">
+      <div class="overview-league-name">${lg.name}</div>
+      <div class="overview-payouts">${best ? `Best available: ${best.info.name} (${best.proj.toFixed(1)} pts)` : 'Open waiver board'}</div>
+      </div>
+      <div style="text-align:right;">
+        ${faab!==null?`<div style="font-size:12px;color:var(--gold);">FAAB: $${faab}</div>`:''}
+        <div style="font-size:11px;color:var(--chalk-dim);">${bids} staged bid${bids===1?'':'s'}</div>
+      </div>
+    </div>`;
+  }
+
+function renderWaiverBidsSummary(week){
+    const bids = (state.waiverBids||[]).filter(b => b.week === week);
+    if(!bids.length) return '<div style="color:var(--chalk-faint); font-size:12px;">No bids staged for this week yet.</div>';
+    const total = bids.reduce((s,b) => s + (parseFloat(b.amount)||0), 0);
+    return `
+      <div class="overview-list">
+        ${bids.map(b => {
+          const info = playerLabel(b.playerId);
+          return `
+            <div class="overview-row" style="cursor:default;">
+              <div class="overview-main">
+                <div class="overview-league-name">${info?info.name:b.playerId}</div>
+                <div class="overview-payouts">${b.leagueName} · $${(parseFloat(b.amount)||0).toFixed(0)} FAAB</div>
+              </div>
+              <button class="btn-danger-ghost" data-remove-bid="${b.id}">Remove</button>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <div class="empty-note" style="margin-top:10px;">Total staged: $${total.toFixed(0)} across ${bids.length} bid${bids.length===1?'':'s'}.</div>
+    `;
+  }
+
+  function bindWaiverHub(){
+    const week = getProjectionWeek();
+    state.leagues.forEach(lg => {
+      const el = document.getElementById('waiver-open-' + lg.league_id);
+      if(el) el.addEventListener('click', () => {
+        state.waiverHubLeagueId = lg.league_id;
+        state.view = 'waiverHubDetail';
+        render();
+      });
+    });
+    document.querySelectorAll('[data-stage-bid]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const playerId = btn.dataset.stageBid;
+        const leagueId = btn.dataset.leagueId;
+        const leagueName = btn.dataset.leagueName;
+        const rowEl = document.getElementById('waiver-row-' + leagueId + '-' + playerId);
+        if(!rowEl) return;
+        rowEl.innerHTML = `
+          <div style="flex:1; font-size:12px;">FAAB amount for this bid:</div>
+          <input type="number" min="0" id="bid-amount-input" style="width:80px; background:var(--bg); border:1px solid var(--line-strong); color:var(--chalk); padding:6px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace;"/>
+          <button class="btn btn-primary" id="bid-confirm-btn" style="font-size:11px; padding:5px 10px; margin-left:8px;">Confirm</button>
+          <button class="btn btn-ghost" id="bid-cancel-btn" style="font-size:11px; padding:5px 10px;">Cancel</button>
+        `;
+        document.getElementById('bid-confirm-btn').addEventListener('click', async () => {
+          const amount = document.getElementById('bid-amount-input').value;
+          if(amount === '') return;
+          if(!state.waiverBids) state.waiverBids = [];
+          state.waiverBids.push({id: Date.now()+'-'+Math.random().toString(36).slice(2), week, leagueId, leagueName, playerId, amount});
+          await saveWaiverBids(state.waiverBids);
+          toast('Bid staged');
+          const summaryEl = document.getElementById('waiver-bids-summary');
+          if(summaryEl) summaryEl.innerHTML = renderWaiverBidsSummary(week);
+          bindWaiverBidRemovals();
+          render();
+        });
+        document.getElementById('bid-cancel-btn').addEventListener('click', () => render());
+      });
+    });
+    bindWaiverBidRemovals();
+  }
+
+  function bindWaiverBidRemovals(){
+    document.querySelectorAll('[data-remove-bid]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.removeBid;
+        state.waiverBids = (state.waiverBids||[]).filter(b => b.id !== id);
+        await saveWaiverBids(state.waiverBids);
+        document.getElementById('waiver-bids-summary').innerHTML = renderWaiverBidsSummary(getProjectionWeek());
+        bindWaiverBidRemovals();
+      });
+    });
+  }
+
+  function renderWaiverHubDetail(){
+    const lg = state.leagues.find(l => l.league_id === state.waiverHubLeagueId);
+    const detail = state.leagueDetail[state.waiverHubLeagueId];
+    if(!lg || !detail){
+      return renderWaiverHub();
+    }
+    const week = getProjectionWeek();
+    const {groups} = buildWaiverCandidatesByPosition(detail);
+
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <button class="btn btn-ghost" id="btn-back-to-waiverhub" style="margin-bottom:14px;">← All Leagues Waiver Wire</button>
+        <div class="section-title">${lg.name} — Full Waiver Board (Week ${week})</div>
+        <div class="field" style="max-width:320px; margin-bottom:18px;">
+          <label>Search all waiver players</label>
+          <input id="waiver-detail-search" type="text" placeholder="e.g. player name"/>
+        </div>
+        <div id="waiver-detail-results" style="max-height:640px; overflow-y:auto; padding-right:4px;"></div>
+      </div>
+    `;
+    bindTopbar();
+    document.getElementById('btn-back-to-waiverhub').addEventListener('click', () => {
+      state.view = 'waiverHub';
+      render();
+    });
+
+    function paint(query){
+      const q = query.trim().toLowerCase();
+      const resultsEl = document.getElementById('waiver-detail-results');
+      const html = WAIVER_POSITIONS.filter(pos => groups[pos].length).map(pos => {
+        const filtered = q ? groups[pos].filter(p => p.name.toLowerCase().includes(q)) : groups[pos];
+        if(!filtered.length) return '';
+        return `
+          <div style="margin-bottom:22px;">
+            <div class="roster-group-title">${pos}${q ? ` <span style="text-transform:none; letter-spacing:0; color:var(--chalk-faint);">(${filtered.length} match${filtered.length===1?'':'es'})</span>` : ''}</div>
+            <div class="roster-list">
+              ${filtered.map(p => `
+                <div class="player-row" id="waiver-row-${lg.league_id}-${p.pid}">
+                  <div class="slot-tag ${slotColorClass(pos)}">${pos}</div>
+                  <div class="player-name ${nameColorClass(pos)}" style="flex:1;">${playerNameHTML(p)} <span style="color:var(--chalk-faint); font-size:11px;">${p.team}</span></div>
+                  <div class="player-meta" style="width:170px;">${p.proj!=null ? `<span style="color:var(--gold);">Proj ${p.proj.toFixed(1)}</span>` : ''}${p.adds ? ` · +${p.adds} adds` : ''}</div>
+                  <button class="btn btn-primary" data-stage-bid="${p.pid}" data-league-id="${lg.league_id}" data-league-name="${lg.name}" style="font-size:11px; padding:5px 10px;">Bid</button>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }).join('');
+      resultsEl.innerHTML = html || '<div style="color:var(--chalk-faint); font-size:13px;">No matching players.</div>';
+      bindWaiverHub();
+    }
+
+    paint('');
+    document.getElementById('waiver-detail-search').addEventListener('input', (e) => paint(e.target.value));
+  }
+
+  async function renderPlayerShares(){
+    renderLoading('Building your player shares...');
+    await ensurePlayersLoaded();
+    for(const lg of state.leagues){
+      if(!state.leagueDetail[lg.league_id]){
+        try{
+          state.leagueDetail[lg.league_id] = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
+        }catch(e){ /* league skipped if it fails to load */ }
+      }
+    }
+    if(!state.sharesMainTab) state.sharesMainTab = 'all';
+    if(!state.sharesSubTab) state.sharesSubTab = 'all';
+    if(!state.sharesThirdTab) state.sharesThirdTab = 'all';
+    paintPlayerShares();
+  }
+
+  function scopedLeaguesForShares(){
+    const nonDynasty = state.leagues.filter(lg => !isDynastyLeague(lg.name));
+    if(state.sharesMainTab === 'all') return state.leagues;
+    if(state.sharesMainTab === 'dynasty') return state.leagues.filter(lg => isDynastyLeague(lg.name));
+    if(state.sharesSubTab === 'guillotine') return nonDynasty.filter(lg => isGuillotineLeague(lg.name));
+    if(state.sharesSubTab === 'redraft'){
+      const trueRedraft = nonDynasty.filter(lg => !isGuillotineLeague(lg.name));
+      if(state.sharesThirdTab === 'managed') return trueRedraft.filter(lg => categoryForLeagueName(lg.name) === 'Redraft (Managed)');
+      if(state.sharesThirdTab === 'unmanaged') return trueRedraft.filter(lg => categoryForLeagueName(lg.name) === 'Redraft (Unmanaged)');
+      return trueRedraft; // 'all'
+    }
+    return nonDynasty; // redraft top-level 'all'
+  }
+
+  function isDraftComplete(detail){
+    const status = detail && detail.league && detail.league.status;
+    return !!status && status !== 'pre_draft' && status !== 'drafting';
+  }
+
+  function buildShareList(leaguesScope){
+    const shareMap = {};
+    leaguesScope.forEach(lg => {
+      const detail = state.leagueDetail[lg.league_id];
+      if(!detail) return;
+      const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
+      if(!myRoster) return;
+      (myRoster.players || []).forEach(pid => {
+        if(!shareMap[pid]) shareMap[pid] = {count:0, leagues:[]};
+        shareMap[pid].count++;
+        shareMap[pid].leagues.push(lg.name);
+      });
+    });
+    const draftedLeagues = leaguesScope.filter(lg => isDraftComplete(state.leagueDetail[lg.league_id]));
+    const totalDrafted = draftedLeagues.length;
+    return Object.keys(shareMap).map(pid => {
+      const info = playerLabel(pid);
+      const count = shareMap[pid].count;
+      const pct = totalDrafted > 0 ? (count / totalDrafted * 100) : 0;
+      return {pid, info, count, pct, leagues: shareMap[pid].leagues};
+    }).sort((a,b) => b.count - a.count || (a.info?a.info.name:'').localeCompare(b.info?b.info.name:''));
+  }
+
+  function paintPlayerShares(){
+    const scopeLeagues = scopedLeaguesForShares();
+    const list = buildShareList(scopeLeagues);
+
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <div class="section-title">Player Shares</div>
+        <div class="tabs">
+          <div class="tab ${state.sharesMainTab==='all'?'active':''}" data-main="all">All</div>
+          <div class="tab ${state.sharesMainTab==='dynasty'?'active':''}" data-main="dynasty">Dynasty Leagues</div>
+          <div class="tab ${state.sharesMainTab==='redraft'?'active':''}" data-main="redraft">Redraft Leagues</div>
+        </div>
+        ${state.sharesMainTab==='redraft' ? `
+        <div class="tabs" style="margin-top:2px;">
+          <div class="tab ${state.sharesSubTab==='all'?'active':''}" data-sub="all">All</div>
+          <div class="tab ${state.sharesSubTab==='guillotine'?'active':''}" data-sub="guillotine">Guillotine</div>
+          <div class="tab ${state.sharesSubTab==='redraft'?'active':''}" data-sub="redraft">Redraft</div>
+        </div>` : ''}
+        ${state.sharesMainTab==='redraft' && state.sharesSubTab==='redraft' ? `
+        <div class="tabs" style="margin-top:2px;">
+          <div class="tab ${state.sharesThirdTab==='all'?'active':''}" data-third="all">All</div>
+          <div class="tab ${state.sharesThirdTab==='managed'?'active':''}" data-third="managed">Managed</div>
+          <div class="tab ${state.sharesThirdTab==='unmanaged'?'active':''}" data-third="unmanaged">Unmanaged</div>
+        </div>` : ''}
+        <div class="empty-note" style="margin:14px 0;">How many of your leagues in this view (${scopeLeagues.length} league${scopeLeagues.length===1?'':'s'}) each player is on your roster in — includes bench and IR. Percentage is out of leagues that have finished drafting only. Highest share first.</div>
+        <div class="field" style="max-width:320px; margin-bottom:18px;">
+          <label>Search all waiver players</label>
+          <input id="shares-search" type="text" placeholder="e.g. Justin Herbert"/>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"><button class="btn btn-primary" data-share-filter="1">All</button><button class="btn btn-ghost" data-share-filter="2">2+ Leagues</button><button class="btn btn-ghost" data-share-filter="3">3+ Leagues</button><button class="btn btn-ghost" data-share-filter="5">5+ Leagues</button></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"><button class="btn btn-primary" data-position-filter="ALL">All Positions</button><button class="btn btn-ghost" data-position-filter="QB">QB</button><button class="btn btn-ghost" data-position-filter="RB">RB</button><button class="btn btn-ghost" data-position-filter="WR">WR</button><button class="btn btn-ghost" data-position-filter="TE">TE</button></div><div id="shares-list"></div>
+      </div>
+    `;
+    bindTopbar();
+
+    document.querySelectorAll('[data-main]').forEach(t => t.addEventListener('click', ()=>{
+      state.sharesMainTab = t.dataset.main;
+      state.sharesSubTab = 'all';
+      state.sharesThirdTab = 'all';
+      paintPlayerShares();
+    }));
+    document.querySelectorAll('[data-sub]').forEach(t => t.addEventListener('click', ()=>{
+      state.sharesSubTab = t.dataset.sub;
+      state.sharesThirdTab = 'all';
+      paintPlayerShares();
+    }));
+    document.querySelectorAll('[data-third]').forEach(t => t.addEventListener('click', ()=>{
+      state.sharesThirdTab = t.dataset.third;
+      paintPlayerShares();
+    }));
+
+    function paintList(query){
+      const q = query.trim().toLowerCase();
+      const minShares = state.shareMinFilter || 1; const posFilter = state.sharePositionFilter || "ALL"; const base=(q ? list.filter(p => p.info && p.info.name.toLowerCase().includes(q)) : list); const filtered=base.filter(p=>p.count>=minShares).filter(p=>posFilter==="ALL" || (p.info && p.info.pos===posFilter));
+      const grouped={QB:[],RB:[],WR:[],TE:[],OTHER:[]}; filtered.forEach(p=>{const k=(p.info&&['QB','RB','WR','TE'].includes(p.info.pos))?p.info.pos:'OTHER'; grouped[k].push(p);}); document.getElementById('shares-list').innerHTML = ['QB','RB','WR','TE','OTHER'].map(pos=>{ const arr=grouped[pos]; if(!arr.length) return ''; return `<div style="margin-bottom:20px;"><div class="roster-group-title">${pos==='OTHER'?'Other Positions':pos+' Exposure'}</div><div class="roster-list">${arr.map(p => `
+            <div class="player-row">
+              <div class="slot-tag ${slotColorClass(p.info?p.info.pos:'')}">${p.info?p.info.pos:'?'}</div>
+              <div style="flex:1; min-width:0;">
+                <div class="player-name ${p.info?nameColorClass(p.info.pos):''}">${p.info?playerNameHTML(p.info):p.pid}</div>
+                <div style="font-size:11px; color:var(--chalk-faint); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${p.leagues.join(', ')}</div>
+              </div>
+              <div style="text-align:right; flex-shrink:0; min-width:74px;">
+                <div class="scoreboard-num" style="font-size:22px;">${p.pct.toFixed(0)}%</div>
+                <div style="font-size:10px; color:var(--chalk-faint);">${p.count} share${p.count===1?'':'s'}</div>
+              </div>
+            </div>
+          `).join('')}</div></div>`;}).join('') || '<div style="color:var(--chalk-faint); font-size:13px; padding:12px 2px;">No players match your search.</div>';
+    }
+
+    paintList('');
+    document.getElementById('shares-search').addEventListener('input', (e) => paintList(e.target.value)); document.querySelectorAll('[data-position-filter]').forEach(btn=>btn.addEventListener('click',()=>{state.sharePositionFilter=btn.dataset.positionFilter; document.querySelectorAll('[data-position-filter]').forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');}); btn.classList.remove('btn-ghost'); btn.classList.add('btn-primary'); paintList(document.getElementById('shares-search').value);})); document.querySelectorAll('[data-share-filter]').forEach(btn=>btn.addEventListener('click',()=>{state.shareMinFilter=parseInt(btn.dataset.shareFilter,10); document.querySelectorAll('[data-share-filter]').forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');}); btn.classList.remove('btn-ghost'); btn.classList.add('btn-primary'); paintList(document.getElementById('shares-search').value);}));
+  }
+
+  // Leagues with no real money on the line — no buy-in/payout tracking needed for these.
+  const FREE_LEAGUE_NAMES = ['24hr maccas'];
+  function isFreeLeague(name){
+    const lower = (name||'').toLowerCase();
+    return FREE_LEAGUE_NAMES.some(n => lower.includes(n));
+  }
+
+  // The one league that gets the deep-dive Season Planner tab.
+  const PLANNER_LEAGUE_NAMES = ['24hr maccas'];
+  function isPlannerLeague(name){
+    const lower = (name||'').toLowerCase();
+    return PLANNER_LEAGUE_NAMES.some(n => lower.includes(n));
+  }
+
+  // Feature 2: user-entered matchup difficulty rankings (1=hardest, 32=easiest),
+  // one ranking set per position (QB/RB/WR/TE/DEF). Stored once, globally —
+  // these describe NFL defenses, not anything league-specific.
+  const RANKING_POSITIONS = ['QB','RB','WR','TE','DEF'];
+  async function loadMatchupRankings(){
+    try{
+      const v = localStorage.getItem(APP_PREFIX + 'matchupRankings');
+      return v ? JSON.parse(v) : {};
+    }catch(e){ return {}; }
+  }
+  async function saveMatchupRankings(data){
+    try{ localStorage.setItem(APP_PREFIX + 'matchupRankings', JSON.stringify(data)); }catch(e){}
+  }
+  function getMatchupDifficulty(pos, oppTeam){
+    const table = state.matchupRankings && state.matchupRankings[pos];
+    if(!table) return null;
+    const r = table[oppTeam];
+    return (r === '' || r == null) ? null : parseInt(r, 10);
+  }
+  // 1 (hardest) -> dark red, 32 (easiest) -> dark green, through orange/yellow between.
+  function rankColor(rank){
+    if(rank == null || isNaN(rank)) return null;
+    const clamped = Math.max(1, Math.min(32, rank));
+    const hue = (clamped - 1) / 31 * 120;
+    return `hsl(${hue.toFixed(0)}, 68%, 34%)`;
+  }
+
+  // Feature 3: planned FAAB bids — a personal checklist, not a real Sleeper
+  // waiver claim. {leagueId, leagueName, week, playerId, amount}
+  async function loadWaiverBids(){
+    try{
+      const v = localStorage.getItem(APP_PREFIX + 'waiverBids');
+      return v ? JSON.parse(v) : [];
+    }catch(e){ return []; }
+  }
+  async function saveWaiverBids(bids){
+    try{ localStorage.setItem(APP_PREFIX + 'waiverBids', JSON.stringify(bids)); }catch(e){}
+  }
+
+  async function renderLeagueDetail(){
+    const detail = state.leagueDetail[state.currentLeagueId];
+    const lg = state.leagues.find(l => l.league_id === state.currentLeagueId);
+    if(!detail){ state.view='leagues'; return render(); }
+    const free = isFreeLeague(lg.name);
+    const guillotineFmt = isGuillotineLeague(lg.name);
+    const plannerLeague = isPlannerLeague(lg.name);
+    if(free && state.currentTab === 'payouts'){ state.currentTab = 'standings'; }
+    if(guillotineFmt && state.currentTab === 'matchup'){ state.currentTab = 'standings'; }
+
+    app.innerHTML = `
+      ${renderTopbar(true)}
+      <div class="body-scroll">
+        <div class="league-header">
+          <h2>${lg.name}</h2>
+          <span class="pill">${detail.league.status}</span>
+          ${free ? `<span class="pill pill-out">Free League</span>` : ''}
+        </div>
+        <div class="tabs">
+          <div class="tab ${state.currentTab==='standings'?'active':''}" data-tab="standings">Standings</div>
+          <div class="tab ${state.currentTab==='rosters'?'active':''}" data-tab="rosters">Rosters</div>
+          ${guillotineFmt ? '' : `<div class="tab ${state.currentTab==='matchup'?'active':''}" data-tab="matchup">Week ${getProjectionWeek()} Matchup</div>`}
+          <div class="tab ${state.currentTab==='waiver'?'active':''}" data-tab="waiver">Waiver Wire</div>
+          ${plannerLeague ? `<div class="tab ${state.currentTab==='planner'?'active':''}" data-tab="planner">Season Planner</div>` : ''}
+          ${free ? '' : `<div class="tab ${state.currentTab==='payouts'?'active':''}" data-tab="payouts">Buy-in &amp; Payouts</div>`}
+        </div>
+        <div id="tab-content"></div>
+      </div>
+    `;
+    bindTopbar();
+    app.querySelectorAll('.tab').forEach(t => t.addEventListener('click', ()=>{
+      state.currentTab = t.dataset.tab;
+      render();
+    }));
+
+    const content = document.getElementById('tab-content');
+    if(state.currentTab === 'standings'){
+      if(guillotineFmt){
+        content.innerHTML = renderGuillotineStandingsTab(detail);
+        bindGuillotineStandings(detail);
+      } else {
+        content.innerHTML = renderStandingsTab(detail);
+      }
+    } else if(state.currentTab === 'rosters'){
+      content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading player data and projections...</div>`;
+      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+      content.innerHTML = renderRostersTab(detail);
+      bindRosterPicker(detail);
+    } else if(state.currentTab === 'matchup' && !guillotineFmt){
+      content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Week ${getProjectionWeek()} matchup and projections...</div>`;
+      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+      if(!detail.matchupsWeek1){
+        try{
+          detail.matchupsWeek1 = await fetchJSON(`https://api.sleeper.app/v1/league/${state.currentLeagueId}/matchups/${getProjectionWeek()}`);
+        }catch(e){
+          detail.matchupsWeek1 = [];
+        }
+      }
+      content.innerHTML = renderMatchupTab(detail);
+      bindMatchupTab(detail);
+    } else if(state.currentTab === 'waiver'){
+      content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading player pool, trending adds, and projections...</div>`;
+      await Promise.all([ensurePlayersLoaded(), ensureTrendingLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+      content.innerHTML = renderWaiverWireTab(detail);
+    } else if(state.currentTab === 'planner' && plannerLeague){
+      content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading planner data...</div>`;
+      if(!state.plannerWeek) state.plannerWeek = getProjectionWeek();
+      if(!state.plannerSubView) state.plannerSubView = 'lineup';
+      if(!state.matchupRankings) state.matchupRankings = await loadMatchupRankings();
+      await Promise.all([ensurePlayersLoaded(), ensurePlannerProjectionsForWeek(state.plannerWeek).catch(()=>null)]);
+      if(!detail.plannerMoves){
+        detail.plannerMoves = await loadPlannerMoves(state.currentLeagueId);
+      }
+      content.innerHTML = renderSeasonPlannerTab(detail);
+      bindSeasonPlannerTab(detail);
+    } else if(state.currentTab === 'payouts' && !free){
+      content.innerHTML = renderPayoutsTab(detail, lg.name);
+      bindPayoutsForm(detail, lg.name);
+    }
+  }
+
+  function renderStandingsTab(detail){
+    const standings = computeStandings(detail.rosters, detail.usersById);
+    const playoffTeams = (detail.league.settings && detail.league.settings.playoff_teams) || 0;
+    let rowsHTML = '';
+    standings.forEach((row, idx) => {
+      if(playoffTeams > 0 && idx === playoffTeams){
+        rowsHTML += `<tr><td colspan="6" style="padding:0; border:none;">
+          <div class="yard-marker"><span class="yard-marker-label">Playoff Line</span></div>
+        </td></tr>`;
+      }
+      const isMe = row.roster_id === detail.myRosterId;
+      const u = row.user;
+      rowsHTML += `
+        <tr class="${isMe?'me':''}">
+          <td><span class="rank-num">${idx+1}</span></td>
+          <td>
+            <div class="team-cell">
+              ${avatarHTML(u&&u.avatar, u&&u.display_name)}
+              <div>
+                <div class="team-name">${teamDisplayName(u, row.raw)}${isMe?' <span style="color:var(--gold); font-size:11px;">(You)</span>':''}</div>
+                <div class="owner-name">${u ? u.display_name : 'Unknown'}</div>
+              </div>
+            </div>
+          </td>
+          <td class="mono">${row.wins}-${row.losses}${row.ties?('-'+row.ties):''}</td>
+          <td class="mono">${row.pf.toFixed(2)}</td>
+          <td class="mono">${row.pa.toFixed(2)}</td>
+        </tr>
+      `;
+    });
+    return `
+      <table class="standings-table">
+        <thead><tr><th>#</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th></tr></thead>
+        <tbody>${rowsHTML}</tbody>
+      </table>
+    `;
+  }
+
+  function faabRemaining(row, detail){
+    const total = (detail.league.settings && detail.league.settings.waiver_budget) || 0;
+    const used = (row.raw.settings && row.raw.settings.waiver_budget_used) || 0;
+    return {total, remaining: total - used};
+  }
+
+  function guillotineRowHTML(row, detail, isCut){
+    const u = row.user;
+    const isMe = row.roster_id === detail.myRosterId;
+    const faab = faabRemaining(row, detail);
+    return `
+      <div class="guillotine-row ${isCut?'cut-row':''} ${isMe?'me':''}">
+        <div class="team-cell">
+          ${avatarHTML(u&&u.avatar, u&&u.display_name)}
+          <div>
+            <div class="team-name">${teamDisplayName(u, row.raw)}${isMe?' <span style="color:var(--gold); font-size:11px;">(You)</span>':''}</div>
+            <div class="owner-name">${u ? u.display_name : 'Unknown'}</div>
+          </div>
+        </div>
+        <div class="guillotine-pf mono">${row.pf.toFixed(2)} <span style="color:var(--chalk-faint); font-size:10px;">PF</span></div>
+        ${faab.total > 0 ? `<div class="guillotine-faab mono">$${faab.remaining} <span style="color:var(--chalk-faint); font-size:10px;">FAAB</span></div>` : ''}
+        ${isCut
+          ? `<span class="cut-badge">${GUILLOTINE_ICON} CUT</span><button class="btn-ghost" data-restore="${row.roster_id}">Restore</button>`
+          : `<button class="btn-danger-ghost" data-cut="${row.roster_id}">Mark Cut</button>`}
+      </div>
+    `;
+  }
+
+  function renderGuillotineStandingsTab(detail){
+    const standings = computeStandings(detail.rosters, detail.usersById);
+    const sorted = [...standings].sort((a,b) => b.pf - a.pf);
+    const cutSet = new Set(detail.cutRosters || []);
+    const alive = sorted.filter(r => !cutSet.has(r.roster_id));
+    const cut = sorted.filter(r => cutSet.has(r.roster_id));
+    const leagueBudget = (detail.league.settings && detail.league.settings.waiver_budget) || 0;
+    const totalFaabRemaining = alive.reduce((sum, r) => sum + faabRemaining(r, detail).remaining, 0);
+    const myRow = alive.find(r => r.roster_id === detail.myRosterId);
+    const iAmCut = !myRow && cutSet.has(detail.myRosterId);
+    const myFaab = myRow ? faabRemaining(myRow, detail).remaining : 0;
+    const myShare = (totalFaabRemaining > 0 && myRow) ? (myFaab / totalFaabRemaining * 100) : 0;
+    const fairShare = alive.length > 0 ? (100 / alive.length) : 0;
+    const fairShareDollars = alive.length > 0 ? (totalFaabRemaining / alive.length) : 0;
+
+    return `
+      ${leagueBudget > 0 ? `
+      <div class="overview-summary" style="margin-bottom:18px; flex-wrap:wrap;">
+        <div class="overview-summary-item">
+          <div class="overview-summary-label">Total FAAB Remaining (Still In)</div>
+          <div class="overview-summary-val">$${totalFaabRemaining}</div>
+        </div>
+        ${myRow ? `
+        <div class="overview-summary-item">
+          <div class="overview-summary-label">Your FAAB</div>
+          <div class="overview-summary-val">$${myFaab}</div>
+        </div>
+        <div class="overview-summary-item">
+          <div class="overview-summary-label">Your Share of Remaining Pool</div>
+          <div class="overview-summary-val">${myShare.toFixed(1)}%</div>
+        </div>
+        <div class="overview-summary-item">
+          <div class="overview-summary-label">Equal Split Would Be</div>
+          <div class="overview-summary-val">${fairShare.toFixed(1)}%<span style="font-size:14px; color:var(--chalk-faint);"> ($${fairShareDollars.toFixed(0)})</span></div>
+        </div>` : iAmCut ? `
+        <div class="overview-summary-item" style="border-left-color:var(--alert);">
+          <div class="overview-summary-label">Your FAAB</div>
+          <div class="overview-summary-val" style="font-size:16px; color:var(--chalk-dim);">You're cut</div>
+        </div>` : ''}
+      </div>` : ''}
+      <div class="section-title">Still In (${alive.length}) <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">— ranked by points for</span></div>
+      <div class="guillotine-list">
+        ${alive.map(r => guillotineRowHTML(r, detail, false)).join('') || '<div style="color:var(--chalk-faint); font-size:13px; padding:8px 2px;">Nobody left — grim.</div>'}
+      </div>
+      ${cut.length ? `
+        <div class="section-title" style="margin-top:24px;">Eliminated 💀</div>
+        <div class="guillotine-list">
+          ${cut.map(r => guillotineRowHTML(r, detail, true)).join('')}
+        </div>
+      ` : ''}
+      ${leagueBudget > 0 && myRow ? `<div class="empty-note">Your share vs. an equal split tells you whether you're FAAB-rich or FAAB-poor relative to the field — above the equal-split number means you have more buying power than average, below means less.</div>` : ''}
+      <div class="empty-note" style="margin-top:8px;">Sleeper doesn't track eliminations for guillotine leagues, so mark teams cut yourself as they go — it's saved to this league from then on.</div>
+      <div class="empty-note" style="margin-top:14px;">Sleeper doesn't track eliminations for guillotine leagues, so mark teams cut yourself as they go — it's saved to this league from then on.</div>
+    `;
+  }
+
+  function bindGuillotineStandings(detail){
+    function rebind(){
+      document.querySelectorAll('[data-cut]').forEach(btn => {
+        btn.addEventListener('click', async ()=>{
+          const rid = parseInt(btn.dataset.cut, 10);
+          const set = new Set(detail.cutRosters || []);
+          set.add(rid);
+          detail.cutRosters = Array.from(set);
+          await saveCutRosters(state.currentLeagueId, detail.cutRosters);
+          document.getElementById('tab-content').innerHTML = renderGuillotineStandingsTab(detail);
+          rebind();
+        });
+      });
+      document.querySelectorAll('[data-restore]').forEach(btn => {
+        btn.addEventListener('click', async ()=>{
+          const rid = parseInt(btn.dataset.restore, 10);
+          detail.cutRosters = (detail.cutRosters || []).filter(x => x !== rid);
+          await saveCutRosters(state.currentLeagueId, detail.cutRosters);
+          document.getElementById('tab-content').innerHTML = renderGuillotineStandingsTab(detail);
+          rebind();
+        });
+      });
+    }
+    rebind();
+  }
+
+  const WAIVER_POSITIONS = ['QB','RB','WR','TE','K','DEF'];
+
+  function computeOwnedPlayerIds(detail){
+    const owned = new Set();
+    detail.rosters.forEach(r => (r.players || []).forEach(pid => owned.add(pid)));
+    return owned;
+  }
+
+  function findMatchupPair(detail){
+    const matchups = detail.matchupsWeek1 || [];
+    const mine = matchups.find(m => m.roster_id === detail.myRosterId);
+    if(!mine) return null;
+    const opp = matchups.find(m => m.matchup_id === mine.matchup_id && m.roster_id !== mine.roster_id);
+    return {mine, opp};
+  }
+
