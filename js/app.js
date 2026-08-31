@@ -1596,6 +1596,7 @@ function renderWaiverBidsSummary(week){
     rebind();
   }
 
+
   const WAIVER_POSITIONS = ['QB','RB','WR','TE','K','DEF'];
 
   function computeOwnedPlayerIds(detail){
