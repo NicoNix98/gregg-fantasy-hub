@@ -1202,10 +1202,19 @@ function renderWaiverBidsSummary(week){
       <div class="body-scroll">
         <button class="btn btn-ghost" id="btn-back-to-waiverhub" style="margin-bottom:14px;">← All Leagues Waiver Wire</button>
         <div class="section-title">${lg.name} — Full Waiver Board (Week ${week})</div>
-        <div class="field" style="max-width:320px; margin-bottom:18px;">
-          <label>Search all waiver players</label>
+        <div class="field" style="max-width:320px; margin-bottom:10px;">
+         <label>Search all waiver players</label>
           <input id="waiver-detail-search" type="text" placeholder="e.g. player name"/>
         </div>
+
+        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
+         <button class="btn btn-ghost btn-mini" data-waiver-filter="ALL">ALL</button>
+         <button class="btn btn-ghost btn-mini" data-waiver-filter="QB">QB</button>
+         <button class="btn btn-ghost btn-mini" data-waiver-filter="RB">RB</button>
+         <button class="btn btn-ghost btn-mini" data-waiver-filter="WR">WR</button>
+         <button class="btn btn-ghost btn-mini" data-waiver-filter="TE">TE</button>
+        </div>
+
         <div id="waiver-detail-results" style="max-height:640px; overflow-y:auto; padding-right:4px;"></div>
       </div>
     `;
@@ -1214,11 +1223,14 @@ function renderWaiverBidsSummary(week){
       state.view = 'waiverHub';
       render();
     });
-
+    let waiverPositionFilter = 'ALL';
     function paint(query){
       const q = query.trim().toLowerCase();
       const resultsEl = document.getElementById('waiver-detail-results');
-      const html = WAIVER_POSITIONS.filter(pos => groups[pos].length).map(pos => {
+      const html = WAIVER_POSITIONS
+        .filter(pos => groups[pos].length)
+       .filter(pos => waiverPositionFilter === 'ALL' || pos === waiverPositionFilter)
+        .map(pos => {
         const filtered = q ? groups[pos].filter(p => p.name.toLowerCase().includes(q)) : groups[pos];
         if(!filtered.length) return '';
         return `
@@ -1242,8 +1254,27 @@ function renderWaiverBidsSummary(week){
     }
 
     paint('');
-    document.getElementById('waiver-detail-search').addEventListener('input', (e) => paint(e.target.value));
-  }
+
+document.getElementById('waiver-detail-search')
+  .addEventListener('input', (e) => paint(e.target.value));
+
+document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
+  btn.addEventListener('click', () => {
+
+    waiverPositionFilter = btn.dataset.waiverFilter;
+
+    document.querySelectorAll('[data-waiver-filter]').forEach(b => {
+      b.classList.remove('btn-primary');
+      b.classList.add('btn-ghost');
+    });
+
+    btn.classList.remove('btn-ghost');
+    btn.classList.add('btn-primary');
+
+    paint(document.getElementById('waiver-detail-search').value);
+  });
+});
+}
 
   async function renderPlayerShares(){
     renderLoading('Building your player shares...');
