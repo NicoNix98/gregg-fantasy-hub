@@ -105,6 +105,42 @@
   async function saveSettings(username, season){
     try{ localStorage.setItem(APP_PREFIX + 'settings', JSON.stringify({username, season})); }catch(e){}
   }
+  async function exportUserData(){
+  const data = {};
+
+  Object.keys(localStorage).forEach(key => {
+    if(key.startsWith(APP_PREFIX)){
+      data[key] = localStorage.getItem(key);
+    }
+  });
+
+  const blob = new Blob(
+    [JSON.stringify(data, null, 2)],
+    { type: 'application/json' }
+  );
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `fantasy-hub-backup-${new Date().toISOString().slice(0,10)}.json`;
+
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  URL.revokeObjectURL(url);
+}
+  async function importUserData(file){
+  const text = await file.text();
+  const data = JSON.parse(text);
+
+  Object.entries(data).forEach(([key, value]) => {
+    localStorage.setItem(key, value);
+  });
+
+  alert('Backup imported successfully. Please refresh the page.');
+}
   async function loadPayout(leagueId){
     try{
       const v = localStorage.getItem(APP_PREFIX + 'payouts:' + leagueId);
@@ -490,6 +526,8 @@
           ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-shares">Player Shares</button>` : ''}
           ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-waiverhub">Waiver Wire</button>` : ''}
           ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-overview">Buy-ins Overview</button>` : ''}
+          <button class="btn btn-ghost" id="btn-export-data">Export Data</button>
+          <button class="btn btn-ghost" id="btn-import-data">Import Data</button>
           <button class="btn btn-ghost" id="btn-change-user">Change User</button>
         </div>
       </div>
@@ -517,6 +555,27 @@
     if(wh) wh.addEventListener('click', ()=>{ state.view='waiverHub'; render(); });
     const ov = document.getElementById('btn-overview');
     if(ov) ov.addEventListener('click', ()=>{ state.view='overview'; render(); });
+    const exp = document.getElementById('btn-export-data');
+    if(exp) exp.addEventListener('click', async () => {
+      await exportUserData();
+    });
+    const imp = document.getElementById('btn-import-data');
+    if(imp) imp.addEventListener('click', async () => {
+
+      const input = document.createElement('input');
+     input.type = 'file';
+      input.accept = '.json';
+
+      input.onchange = async (e) => {
+        const file = e.target.files[0];
+       if(file){
+         await importUserData(file);
+        }
+     };
+
+      input.click();
+
+});
     const chg = document.getElementById('btn-change-user');
     if(chg) chg.addEventListener('click', ()=>{ state.view='setup'; state.error=null; render(); });
   }
@@ -2639,6 +2698,7 @@ function renderWaiverBidsSummary(week){
 
   // ---------------- Boot ----------------
   async function boot(){
+    console.log(typeof importUserData);
     renderLoading('Starting up...');
     const settings = await loadSettings();
     if(settings && settings.username && settings.season){
