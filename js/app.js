@@ -522,13 +522,16 @@
             </select>
             <button class="btn btn-ghost" id="btn-next-week" title="Advance to next week">Next Week ▶</button>
           </div>` : ''}
-          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-matchups">Week ${getProjectionWeek()} Matchups</button>` : ''}
-          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-shares">Player Shares</button>` : ''}
-          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-waiverhub">Waiver Wire</button>` : ''}
-          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-overview">Buy-ins Overview</button>` : ''}
-          <button class="btn btn-ghost" id="btn-export-data">Export Data</button>
-          <button class="btn btn-ghost" id="btn-import-data">Import Data</button>
-          <button class="btn btn-ghost" id="btn-change-user">Change User</button>
+          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-matchups">⚔ Matchups</button>` : ''}
+          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-shares">📊 Shares</button>` : ''}
+          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-waiverhub">🧾 Waivers</button>` : ''}
+          ${state.leagues && state.leagues.length ? `<button class="btn btn-ghost" id="btn-overview">💰 Buy-ins</button>` : ''}
+          </div>
+        <div class="topbar-utils">
+          <button class="btn btn-ghost btn-mini" id="btn-export-data" title="Export Data">💾</button>
+          <button class="btn btn-ghost btn-mini" id="btn-import-data" title="Import Data">📂</button>
+          <button class="btn btn-ghost btn-mini" id="btn-change-user" title="Change User">👤</button>
+          </div>
         </div>
       </div>
     `;

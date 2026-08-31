@@ -555,3 +555,26 @@
 .u-mb14{margin-bottom:14px;}
 .u-small{font-size:12px;}
 .u-small-faint{color:var(--chalk-faint); font-size:12px;}
+.btn-mini{
+  padding: 2px 6px;
+  font-size: 16px;
+  min-height: auto;
+  opacity: 0.8;
+  line-height: 1;
+}
+.topbar{
+  display:flex;
+  align-items:flex-start;
+}
+
+.topbar-actions{
+  display:flex;
+  gap:8px;
+}
+
+.topbar-utils{
+  margin-left:auto;
+  display:flex;
+  gap:4px;
+  align-items:center;
+}
