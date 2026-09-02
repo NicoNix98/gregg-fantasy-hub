@@ -1,4 +1,20 @@
 // Main application bootstrap
+//
+// This app is split across a few files, loaded in this order (see
+// index.html): storage.js, app.js, planner.js, waivers.js, matchups.js,
+// shares.js, guillotine.js. app.js is the shell — it owns `state`, the
+// router, the topbar, and any screen not yet split into its own file.
+// Anything another file needs from here is exposed on window.EZL near
+// the bottom of this file, right before boot(). All localStorage
+// reads/writes go through window.Storage (storage.js) — nothing in this
+// file should call localStorage directly except the projection-week
+// cache, which stays here because it's tightly coupled to
+// state.projectionWeek's in-memory cache invalidation. The shared lineup
+// engine (computeOptimalLineup, SLOT_ELIGIBILITY, lineupTotal,
+// greedyAssignLineup) also stays here even though only
+// matchups.js/planner.js/guillotine.js use it directly — it's exposed via
+// EZL rather than owned by any one screen, since three screens depend on
+// it. Same reasoning for isDraftComplete (matchups.js + shares.js).
 (function(){
   /* =====================================================================
      TABLE OF CONTENTS — grep the label in CAPS to jump to a section.
@@ -6,7 +22,6 @@
      ---------------------------------------------------------------------
      STATE            state object, app root
      TOAST/FETCH       toast(), fetchJSON()
-     STORAGE           settings / payouts / cut-rosters localStorage helpers
      ICONS             GUILLOTINE_ICON, robotIcon(), SLEEPER_LOGO_B64
      PLAYER HELPERS    initials, avatarHTML, teamDisplayName, playerLabel,
                        playerNameHTML, nameColorClass
@@ -14,7 +29,9 @@
                        ensureNflState, getProjectionWeek/setProjectionWeek,
                        ensureProjectionsLoaded, projectedPoints,
                        loadLeaguesForUser, loadLeagueDetail
-     STANDINGS MATH    fpts, computeStandings, median
+     STANDINGS MATH    fpts, computeStandings
+     SHARED CHECKS     isDraftComplete (used by matchups.js + shares.js
+                       via EZL — kept here rather than owned by either)
      ROUTER            render()
      SCREEN: setup     renderLoading, renderErrorBanner, renderSetup,
                        onSetupSubmit
@@ -23,10 +40,6 @@
                        isGuillotineLeague, isDynastyLeague, isFreeLeague
      SCREEN: leagues   renderLeagueList, paintLeagueList, renderLeagueCard
      SCREEN: overview  renderOverview, renderOverviewRow
-     SCREEN: matchups  renderMatchupsOverview, renderGuillotineMatchupRow,
-        overview       renderMatchupSummaryRow
-     SCREEN: shares    renderPlayerShares, scopedLeaguesForShares,
-                       isDraftComplete, buildShareList, paintPlayerShares
      LEAGUE DETAIL     renderLeagueDetail (standings/rosters/matchup/
                        waiver/payouts tab dispatch)
      TAB: standings    renderStandingsTab, faabRemaining, guillotineRowHTML,
@@ -34,16 +47,15 @@
      TAB: rosters      computeOwnedPlayerIds, renderRostersTab, slotLabel,
                        slotColorClass, projMetaHTML, rosterPlayerRow,
                        renderRosterGroups, bindRosterPicker
-     TAB: matchup      SLOT_ELIGIBILITY, computeOptimalLineup, lineupTotal,
-                       findMatchupPair, renderMatchupPanel, renderMatchupTab,
-                       bindMatchupTab
-     TAB: waiver       renderWaiverWireTab
+     LINEUP ENGINE     SLOT_ELIGIBILITY, greedyAssignLineup,
+                       computeOptimalLineup, lineupTotal (shared by
+                       matchups.js, planner.js, guillotine.js via EZL)
      TAB: payouts      currencySymbol, renderPayoutsTab, updatePotSummary,
                        bindPayoutsForm
      BOOT              boot()
      ===================================================================== */
 
-  const APP_PREFIX = 'ezl:';
+  const APP_PREFIX = window.Storage.APP_PREFIX; // single source of truth lives in storage.js
   const state = {
     view: 'loading', // loading | setup | leagues | league
     username: null,
@@ -93,125 +105,6 @@
     return res.json();
   }
 
-  // Standard browser localStorage — this app is meant to be opened as a
-  // standalone local file/page, not run inside Claude's in-chat sandbox
-  // (which blocks both external fetch() and localStorage).
-  async function loadSettings(){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'settings');
-      return v ? JSON.parse(v) : null;
-    }catch(e){ return null; }
-  }
-  async function saveSettings(username, season){
-    try{ localStorage.setItem(APP_PREFIX + 'settings', JSON.stringify({username, season})); }catch(e){}
-  }
-  async function exportUserData(){
-  const data = {};
-
-  Object.keys(localStorage).forEach(key => {
-    if(key.startsWith(APP_PREFIX)){
-      data[key] = localStorage.getItem(key);
-    }
-  });
-
-  const blob = new Blob(
-    [JSON.stringify(data, null, 2)],
-    { type: 'application/json' }
-  );
-
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `fantasy-hub-backup-${new Date().toISOString().slice(0,10)}.json`;
-
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  URL.revokeObjectURL(url);
-}
-  async function importUserData(file){
-  const text = await file.text();
-  const data = JSON.parse(text);
-
-  Object.entries(data).forEach(([key, value]) => {
-    localStorage.setItem(key, value);
-  });
-
-  alert('Backup imported successfully. Please refresh the page.');
-}
-  async function loadPayout(leagueId){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'payouts:' + leagueId);
-      return v ? JSON.parse(v) : null;
-    }catch(e){ return null; }
-  }
-  async function savePayout(leagueId, data){
-    try{ localStorage.setItem(APP_PREFIX + 'payouts:' + leagueId, JSON.stringify(data)); }catch(e){
-      throw e;
-    }
-  }
-
-  // Sleeper has no "eliminated" flag for guillotine-format leagues, so who's been
-  // cut is tracked manually here and saved per league.
-  async function loadCutRosters(leagueId){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'cut:' + leagueId);
-      return v ? JSON.parse(v) : [];
-    }catch(e){ return []; }
-  }
-  async function saveCutRosters(leagueId, rosterIds){
-    try{ localStorage.setItem(APP_PREFIX + 'cut:' + leagueId, JSON.stringify(rosterIds)); }catch(e){}
-  }
-
-  // Season Planner move history — a purely local plan of future add/drop moves.
-  // This CANNOT execute a real Sleeper transaction (no write access); it's a
-  // what-if planning tool only. Each move: {week, addPid, dropPid}.
-  async function loadPlannerMoves(leagueId){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'plannerMoves:' + leagueId);
-      return v ? JSON.parse(v) : [];
-    }catch(e){ return []; }
-  }
-  async function savePlannerMoves(leagueId, moves){
-    try{ localStorage.setItem(APP_PREFIX + 'plannerMoves:' + leagueId, JSON.stringify(moves)); }catch(e){}
-  }
-
-  // Separate small per-week projections cache used only by the Season Planner,
-  // so planning a future week doesn't disturb the global week picker's cache
-  // used everywhere else.
-  async function ensurePlannerProjectionsForWeek(week){
-    if(!state.plannerProjCache) state.plannerProjCache = {};
-    if(state.plannerProjCache[week]) return state.plannerProjCache[week];
-    const positions = ['QB','RB','WR','TE','K','DEF'];
-    const results = await Promise.all(positions.map(pos =>
-      fetchJSON(`https://api.sleeper.app/projections/nfl/${PROJECTION_SEASON}/${week}?season_type=regular&position[]=${pos}`).catch(()=>[])
-    ));
-    const byPlayer = {};
-    results.flat().forEach(p => {
-      if(p && p.player_id) byPlayer[p.player_id] = p.stats || {};
-    });
-    state.plannerProjCache[week] = byPlayer;
-    return byPlayer;
-  }
-  function plannerProjectedPoints(pid, league, week){
-    const byPlayer = state.plannerProjCache && state.plannerProjCache[week];
-    if(!byPlayer) return null;
-    const s = byPlayer[pid];
-    if(!s) return null;
-    const scoring = league.scoring_settings || {};
-    let total = 0, matched = false;
-    Object.keys(scoring).forEach(key => {
-      if(s[key] != null && typeof scoring[key] === 'number'){ total += s[key]*scoring[key]; matched = true; }
-    });
-    if(matched) return total;
-    const rec = scoring.rec || 0;
-    let val = rec >= 1 ? s.pts_ppr : (rec >= 0.5 ? s.pts_half_ppr : s.pts_std);
-    if(val == null) val = s.pts_ppr != null ? s.pts_ppr : (s.pts_half_ppr != null ? s.pts_half_ppr : s.pts_std);
-    return val != null ? val : null;
-  }
-
   const GUILLOTINE_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" style="vertical-align:-3px;"><line x1="4" y1="1" x2="4" y2="23" stroke="currentColor" stroke-width="2"/><line x1="20" y1="1" x2="20" y2="23" stroke="currentColor" stroke-width="2"/><line x1="4" y1="1" x2="20" y2="1" stroke="currentColor" stroke-width="2"/><polygon points="2,9 22,13 22,17 2,13" fill="currentColor"/></svg>`;
 
   // Sleeper's actual logo, embedded as base64 so the app stays a single
@@ -244,8 +137,17 @@
   // ---------------- Data loading ----------------
   async function ensurePlayersLoaded(){
     if(state.playersCache) return state.playersCache;
+    // Check the persisted (localStorage) cache before hitting the network —
+    // this payload is large and rarely changes within a day. See
+    // storage.js's loadPlayersCache/savePlayersCache for the TTL.
+    const cached = await Storage.loadPlayersCache();
+    if(cached){
+      state.playersCache = cached;
+      return cached;
+    }
     const data = await fetchJSON('https://api.sleeper.app/v1/players/nfl');
     state.playersCache = data;
+    await Storage.savePlayersCache(data);
     return data;
   }
 
@@ -278,7 +180,11 @@
     if(state.projectionWeek) return state.projectionWeek;
     let saved = null;
     try{ saved = localStorage.getItem(APP_PREFIX + 'projectionWeek'); }catch(e){}
-    state.projectionWeek = saved ? parseInt(saved, 10) : 1;
+    // No saved preference yet (first-ever load) — fall back to whatever week
+    // Sleeper's own /state/nfl says is current, if it's already been fetched;
+    // otherwise default to 1 until ensureNflState() resolves and calls
+    // setProjectionWeek itself.
+    state.projectionWeek = saved ? parseInt(saved, 10) : (state.nflState ? state.nflState.week : 1);
     return state.projectionWeek;
   }
   function setProjectionWeek(week){
@@ -308,18 +214,20 @@
     return state.projectionsCache;
   }
 
-  // Picks the projection figure matching the league's own scoring format
-  // (full PPR / half PPR / standard) rather than assuming one.
-  // Computes the projection using this league's exact scoring settings against
-  // the raw projected stat line (yards, TDs, receptions, etc.), the same way
-  // Sleeper's own app scores it for that league — rather than picking from the
-  // three generic std/half-PPR/full-PPR buckets, which won't match if the
-  // league has any custom scoring (bonus yardage, TE premium, different TD
-  // values, etc.).
-  function projectedPoints(pid, league){
-    const proj = state.projectionsCache;
-    if(!proj) return null;
-    const s = proj.byPlayer[pid];
+  // Computes a projected score for one raw stat line against a league's
+  // exact scoring settings (yards, TDs, receptions, etc.), the same way
+  // Sleeper's own app scores it for that league — rather than picking from
+  // the three generic std/half-PPR/full-PPR buckets, which won't match if
+  // the league has any custom scoring (bonus yardage, TE premium, different
+  // TD values, etc.). Falls back to the generic PPR-tier buckets only if the
+  // raw stat line didn't overlap with this league's scoring keys at all.
+  //
+  // Pulled out as its own function (rather than living inline inside
+  // projectedPoints below) because planner.js's plannerProjectedPoints() and
+  // waivers.js's candidate-building need the exact same formula against a
+  // different projections cache (a specific future week's, vs. the
+  // top-bar's "current" week) — this is the one place the math lives.
+  function scoreStatLine(s, league){
     if(!s) return null;
     const scoring = league.scoring_settings || {};
     let total = 0;
@@ -331,11 +239,18 @@
       }
     });
     if(matchedAnyStat) return total;
-    // Fallback if the raw stat line didn't overlap with this league's scoring keys at all.
     const rec = scoring.rec || 0;
     let val = rec >= 1 ? s.pts_ppr : (rec >= 0.5 ? s.pts_half_ppr : s.pts_std);
     if(val == null) val = s.pts_ppr != null ? s.pts_ppr : (s.pts_half_ppr != null ? s.pts_half_ppr : s.pts_std);
     return val != null ? val : null;
+  }
+
+  // Picks this week's raw stat line (from the top-bar's current projection
+  // week cache) and scores it to the given league via scoreStatLine.
+  function projectedPoints(pid, league){
+    const proj = state.projectionsCache;
+    if(!proj) return null;
+    return scoreStatLine(proj.byPlayer[pid], league);
   }
 
   async function loadLeaguesForUser(username, season){
@@ -354,8 +269,8 @@
     const usersById = {};
     users.forEach(u => usersById[u.user_id] = u);
     const myRoster = rosters.find(r => r.owner_id === myUserId);
-    const payout = await loadPayout(leagueId);
-    const cutRosters = await loadCutRosters(leagueId);
+    const payout = await Storage.loadPayout(leagueId);
+    const cutRosters = await Storage.loadCutRosters(leagueId);
     return {league, rosters, usersById, myRosterId: myRoster ? myRoster.roster_id : null, payout, cutRosters};
   }
 
@@ -393,10 +308,10 @@
     if(state.view === 'leagues') return renderLeagueList();
     if(state.view === 'league') return renderLeagueDetail();
     if(state.view === 'overview') return renderOverview();
-    if(state.view === 'matchups') return renderMatchupsOverview();
-    if(state.view === 'shares') return renderPlayerShares();
-    if(state.view === 'waiverHub') return renderWaiverHub();
-    if(state.view === 'waiverHubDetail') return renderWaiverHubDetail();
+    if(state.view === 'matchups') return window.Matchups.renderOverview();
+    if(state.view === 'shares') return window.Shares.render();
+    if(state.view === 'waiverHub') return window.Waivers.renderHub();
+    if(state.view === 'waiverHubDetail') return window.Waivers.renderHubDetail();
   }
 
   function renderLoading(msg){
@@ -490,7 +405,7 @@
       state.season = season;
       state.sleeperUserId = user.user_id;
       state.leagues = leagues;
-      await saveSettings(username, season);
+      await Storage.saveSettings(username, season);
       if(!leagues.length){
         state.error = 'No leagues found for that username in ' + season + '. Try a different season.';
         state.view = 'setup';
@@ -560,7 +475,7 @@
     if(ov) ov.addEventListener('click', ()=>{ state.view='overview'; render(); });
     const exp = document.getElementById('btn-export-data');
     if(exp) exp.addEventListener('click', async () => {
-      await exportUserData();
+      await Storage.exportUserData();
     });
     const imp = document.getElementById('btn-import-data');
     if(imp) imp.addEventListener('click', async () => {
@@ -572,7 +487,7 @@
       input.onchange = async (e) => {
         const file = e.target.files[0];
        if(file){
-         await importUserData(file);
+         await Storage.importUserData(file);
         }
      };
 
@@ -608,19 +523,21 @@
 
   async function renderLeagueList(){
     renderLoading('Fetching your leagues...');
-    // fetch quick roster/standing snapshot for each league card
-    const cards = [];
-    for(const lg of state.leagues){
+    // Fetch every league's quick roster/standing snapshot concurrently
+    // rather than one at a time — with N leagues this was N sequential
+    // round trips (league + rosters + users each), now it's the time of
+    // the single slowest league.
+    const cards = await Promise.all(state.leagues.map(async lg => {
       try{
         const detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
         state.leagueDetail[lg.league_id] = detail;
         const standings = computeStandings(detail.rosters, detail.usersById);
         const myIdx = standings.findIndex(r => r.roster_id === detail.myRosterId);
-        cards.push({lg, detail, standings, myIdx});
+        return {lg, detail, standings, myIdx};
       }catch(e){
-        cards.push({lg, error: e.message});
+        return {lg, error: e.message};
       }
-    }
+    }));
     const groups = groupByCategory(cards, c => c.lg.name);
     if(!state.leaguesSubTab || !groups.find(g => g.category === state.leaguesSubTab)){
       state.leaguesSubTab = groups.length ? groups[0].category : null;
@@ -693,11 +610,13 @@
 
   async function renderOverview(){
     renderLoading('Pulling buy-ins and standings...');
-    const rows = [];
     let totalUSD = 0;
     let totalGBP = 0;
     let leaguesWithBuyIn = 0;
-    for(const lg of state.leagues){
+    // Concurrent per-league fetch (same reasoning as renderLeagueList) —
+    // the buy-in totals below are just aggregated from the resolved rows
+    // afterward, so parallelizing this loop doesn't change the math.
+    const rows = await Promise.all(state.leagues.map(async lg => {
       try{
         let detail = state.leagueDetail[lg.league_id];
         if(!detail){
@@ -714,15 +633,16 @@
         const hasBuyIn = payout && payout.buyIn !== '' && payout.buyIn != null;
         const buyIn = hasBuyIn ? (parseFloat(payout.buyIn)||0) : 0;
         const currency = (payout && payout.currency) || 'USD';
-        if(hasBuyIn){
-          leaguesWithBuyIn++;
-          if(currency === 'GBP') totalGBP += buyIn; else totalUSD += buyIn;
-        }
-        rows.push({lg, rank, total, playoffTeams, inPlayoffs, payout, buyIn});
+        return {lg, rank, total, playoffTeams, inPlayoffs, payout, buyIn, hasBuyIn, currency};
       }catch(e){
-        rows.push({lg, error: e.message || 'Failed to load'});
+        return {lg, error: e.message || 'Failed to load'};
       }
-    }
+    }));
+    rows.forEach(r => {
+      if(r.error || !r.hasBuyIn) return;
+      leaguesWithBuyIn++;
+      if(r.currency === 'GBP') totalGBP += r.buyIn; else totalUSD += r.buyIn;
+    });
 
     const groups = groupByCategory(rows, r => r.lg.name);
     app.innerHTML = `
@@ -828,583 +748,10 @@
     `;
   }
 
-  async function renderMatchupsOverview(){
-    renderLoading('Pulling Week ' + getProjectionWeek() + ' matchups...');
-    await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
-    const rows = [];
-    const guillotineRows = [];
-    for(const lg of state.leagues){
-      try{
-        let detail = state.leagueDetail[lg.league_id];
-        if(!detail){
-          detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
-          state.leagueDetail[lg.league_id] = detail;
-        }
-
-        if(isGuillotineLeague(lg.name)){
-          if(!isDraftComplete(detail)){
-            guillotineRows.push({lg, notDrafted:true});
-            continue;
-          }
-          const cutSet = new Set(detail.cutRosters || []);
-          if(cutSet.has(detail.myRosterId)){
-            guillotineRows.push({lg, cut:true});
-            continue;
-          }
-          const aliveRosters = detail.rosters.filter(r => !cutSet.has(r.roster_id));
-          const aliveTotals = aliveRosters.map(r => {
-            const opt = computeOptimalLineup(r, detail.league);
-            return {roster_id: r.roster_id, total: lineupTotal(opt.assignment, opt.pool)};
-          }).sort((a,b) => b.total - a.total);
-          const myEntry = aliveTotals.find(t => t.roster_id === detail.myRosterId);
-          if(!myEntry){
-            guillotineRows.push({lg, error: "Couldn't find your team in this league"});
-            continue;
-          }
-          const rank = aliveTotals.findIndex(t => t.roster_id === detail.myRosterId) + 1;
-          guillotineRows.push({lg, myTotal: myEntry.total, rank, aliveCount: aliveTotals.length});
-          continue;
-        }
-
-        if(!detail.matchupsWeek1){
-          try{
-            detail.matchupsWeek1 = await fetchJSON(`https://api.sleeper.app/v1/league/${lg.league_id}/matchups/${getProjectionWeek()}`);
-          }catch(e){
-            detail.matchupsWeek1 = [];
-          }
-        }
-        const pair = findMatchupPair(detail);
-        if(!pair || !pair.opp){
-          rows.push({lg, notScheduled: true});
-          continue;
-        }
-        const myRoster = detail.rosters.find(r => r.roster_id === pair.mine.roster_id);
-        const oppRoster = detail.rosters.find(r => r.roster_id === pair.opp.roster_id);
-        const oppUser = detail.usersById[oppRoster.owner_id];
-        const myOpt = computeOptimalLineup(myRoster, detail.league);
-        const oppOpt = computeOptimalLineup(oppRoster, detail.league);
-        const myTotal = lineupTotal(myOpt.assignment, myOpt.pool);
-        const oppTotal = lineupTotal(oppOpt.assignment, oppOpt.pool);
-        const allTotals = detail.rosters.map(r => {
-          const opt = computeOptimalLineup(r, detail.league);
-          return lineupTotal(opt.assignment, opt.pool);
-        });
-        const leagueMedian = median(allTotals);
-        rows.push({lg, oppName: teamDisplayName(oppUser, oppRoster), oppUser, myTotal, oppTotal, leagueMedian});
-      }catch(e){
-        if(isGuillotineLeague(lg.name)){
-          guillotineRows.push({lg, error: e.message || 'Failed to load'});
-        } else {
-          rows.push({lg, error: e.message || 'Failed to load'});
-        }
-      }
-    }
-
-    const groups = groupByCategory(rows, r => r.lg.name);
-    app.innerHTML = `
-      ${renderTopbar(true)}
-      <div class="body-scroll">
-        <div class="section-title">Week ${getProjectionWeek()} Matchups</div>
-        <div class="empty-note" style="margin-bottom:18px;">Both totals are each team's best possible Week ${getProjectionWeek()} lineup based on Sleeper's projections. Green means you're currently projected ahead, red means behind. Click any matchup to open it and adjust lineups.</div>
-        ${groups.map(g => `
-          <div class="section-title">${g.category} <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${g.items.length})</span></div>
-          <div class="overview-list" style="margin-bottom:26px;">
-            ${g.items.map(renderMatchupSummaryRow).join('')}
-          </div>
-        `).join('')}
-        ${guillotineRows.length ? `
-          <div class="section-title">Guillotine Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${guillotineRows.length})</span></div>
-          <div class="empty-note" style="margin-bottom:14px;">No head-to-head opponent here — just your predicted Week ${getProjectionWeek()} score and where that ranks you among teams still in.</div>
-          <div class="overview-list" style="margin-bottom:26px;">
-            ${guillotineRows.map(renderGuillotineMatchupRow).join('')}
-          </div>
-        ` : ''}
-      </div>
-    `;
-    bindTopbar();
-    rows.forEach(r => {
-      if(r.error || r.notScheduled) return;
-      const el = document.getElementById('mu-' + r.lg.league_id);
-      if(el) el.addEventListener('click', ()=>{
-        state.currentLeagueId = r.lg.league_id;
-        state.currentTab = 'matchup';
-        state.view = 'league';
-        render();
-      });
-    });
-    guillotineRows.forEach(r => {
-      if(r.error || r.cut) return;
-      const el = document.getElementById('mug-' + r.lg.league_id);
-      if(el) el.addEventListener('click', ()=>{
-        state.currentLeagueId = r.lg.league_id;
-        state.currentTab = 'standings';
-        state.view = 'league';
-        render();
-      });
-    });
-  }
-
-  function renderGuillotineMatchupRow(r){
-    if(r.error){
-      return `
-        <div class="overview-row" style="border-left-color:var(--alert); cursor:default;">
-          <div class="overview-main">
-            <div class="overview-league-name">${r.lg.name}</div>
-            <div style="color:#E08A63; font-size:12px;">Couldn't load — ${r.error}</div>
-          </div>
-        </div>
-      `;
-    }
-    if(r.notDrafted){
-      return `
-        <div class="overview-row" style="cursor:default;">
-          <div class="overview-main">
-            <div class="overview-league-name">${r.lg.name}</div>
-            <div style="color:var(--chalk-faint); font-size:12px;">Draft not complete yet — no score to predict</div>
-          </div>
-        </div>
-      `;
-    }
-    if(r.cut){
-      return `
-        <div class="overview-row" style="cursor:default; opacity:0.6;">
-          <div class="overview-main">
-            <div class="overview-league-name">${r.lg.name}</div>
-            <div style="color:var(--chalk-faint); font-size:12px;">You've been cut — no Week ${getProjectionWeek()} projection to show</div>
-          </div>
-        </div>
-      `;
-    }
-    const isLast = r.rank === r.aliveCount;
-    const inBottomQuarter = r.rank > r.aliveCount * 0.75;
-    const scoreColor = isLast ? '#E85C4A' : (inBottomQuarter ? '#E0A458' : '#7FBF8E');
-    return `
-      <div class="overview-row" id="mug-${r.lg.league_id}">
-        <div class="overview-main">
-          <div class="overview-league-name">${r.lg.name}</div>
-          <div class="overview-payouts">Predicted Week ${getProjectionWeek()} score</div>
-        </div>
-        <div style="text-align:right;">
-          <div class="scoreboard-num" style="color:${scoreColor};">${r.myTotal.toFixed(1)}</div>
-          <div style="font-size:11px; color:var(--chalk-dim);">#${r.rank} (${r.aliveCount} left)</div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderMatchupSummaryRow(r){
-    if(r.error){
-      return `
-        <div class="overview-row" style="border-left-color:var(--alert);">
-          <div class="overview-main">
-            <div class="overview-league-name">${r.lg.name}</div>
-            <div style="color:#E08A63; font-size:12px;">Couldn't load — ${r.error}</div>
-          </div>
-        </div>
-      `;
-    }
-    if(r.notScheduled){
-      return `
-        <div class="overview-row" style="cursor:default;">
-          <div class="overview-main">
-            <div class="overview-league-name">${r.lg.name}</div>
-            <div style="color:var(--chalk-faint); font-size:12px;">Week ${getProjectionWeek()} matchup not scheduled yet</div>
-          </div>
-        </div>
-      `;
-    }
-    const diff = r.myTotal - r.oppTotal;
-    const myColor = diff >= 0 ? '#7FBF8E' : '#E85C4A';
-    const oppColor = diff < 0 ? '#7FBF8E' : '#E85C4A';
-    return `
-      <div class="overview-row" id="mu-${r.lg.league_id}">
-        <div class="overview-main">
-          <div class="overview-league-name">${r.lg.name}</div>
-          <div class="overview-payouts">vs ${r.oppName}</div>
-        </div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
-          <div style="display:flex; gap:18px;">
-            <div class="overview-stat">
-              <div class="overview-stat-label">You</div>
-              <div class="scoreboard-num" style="color:${myColor};">${r.myTotal.toFixed(1)}</div>
-            </div>
-            <div class="overview-stat">
-              <div class="overview-stat-label">Opponent</div>
-              <div class="scoreboard-num" style="color:${oppColor};">${r.oppTotal.toFixed(1)}</div>
-            </div>
-          </div>
-          ${r.leagueMedian != null ? `<div style="color:var(--chalk); font-size:11px;">League median: ${r.leagueMedian.toFixed(1)} pts</div>` : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  async function renderWaiverHub(){
-    renderLoading('Pulling waiver targets across your leagues...');
-    await Promise.all([ensurePlayersLoaded(), ensureTrendingLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
-    if(!state.waiverBids) state.waiverBids = await loadWaiverBids();
-    const week = getProjectionWeek();
-    const guillotineLeagues = [];
-    const redraftLeagues = [];
-    const dynastyLeagues = [];
-    for(const lg of state.leagues){
-      const category = categoryForLeagueName(lg.name);
-      if(category === 'Redraft (Unmanaged)') continue;
-      try{
-        let detail = state.leagueDetail[lg.league_id];
-        if(!detail){ detail = await loadLeagueDetail(lg.league_id, state.sleeperUserId); state.leagueDetail[lg.league_id] = detail; }
-        const owned = computeOwnedPlayerIds(detail);
-        const candidates = [];
-        if(state.projectionsCache){
-          Object.keys(state.projectionsCache.byPlayer).forEach(pid => {
-            if(owned.has(pid)) return;
-            const info = playerLabel(pid);
-            if(!info) return;
-            const pts = projectedPoints(pid, detail.league);
-            if(pts == null) return;
-            candidates.push({pid, info, proj: pts});
-          });
-        }
-        candidates.sort((a,b)=>b.proj-a.proj);
-        const entry = {lg, top5:candidates.slice(0,5)};
-        if(category === 'Guillotine Leagues') guillotineLeagues.push(entry);
-        else if(category === 'Dynasty Leagues') dynastyLeagues.push(entry);
-        else if(category === 'Redraft (Managed)') redraftLeagues.push(entry);
-      }catch(e){}
-    }
-    app.innerHTML = `
-      ${renderTopbar(true)}
-      <div class="body-scroll">
-        <div class="section-title">Waiver Wire — Week ${week}</div>
-
-        <div class="section-title">Guillotine Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${guillotineLeagues.length})</span></div>
-        <div class="overview-list" style="margin-bottom:26px;">${guillotineLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
-
-        <div class="section-title">Redraft Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${redraftLeagues.length})</span></div>
-        <div class="overview-list" style="margin-bottom:26px;">${redraftLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
-
-        <div class="section-title">Dynasty Leagues <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(${dynastyLeagues.length})</span></div>
-        <div class="overview-list" style="margin-bottom:26px;">${dynastyLeagues.map(renderWaiverHubLeagueCard).join('')}</div>
-
-        <div class="section-title">Your Bids This Week (Week ${week})</div>
-        <div id="waiver-bids-summary">${renderWaiverBidsSummary(week)}</div>
-      </div>`;
-    bindTopbar();
-    bindWaiverHub();
-  }
-
-function renderWaiverHubLeagueCard({lg, top5, error}){
-    if(error) return '';
-    const best = top5 && top5.length ? top5[0] : null;
-    const detail = state.leagueDetail[lg.league_id];
-    const myRoster = detail ? detail.rosters.find(r=>r.roster_id===detail.myRosterId) : null;
-    const faab = detail && myRoster ? ((detail.league.settings?.waiver_budget||0) - (myRoster.settings?.waiver_budget_used||0)) : null;
-    const bids = (state.waiverBids||[]).filter(b=>b.leagueId===lg.league_id && b.week===getProjectionWeek()).length;
-    return `<div class="overview-row" id="waiver-open-${lg.league_id}">
-      <div class="overview-main">
-      <div class="overview-league-name">${lg.name}</div>
-      <div class="overview-payouts">${best ? `Best available: ${best.info.name} (${best.proj.toFixed(1)} pts)` : 'Open waiver board'}</div>
-      </div>
-      <div style="text-align:right;">
-        ${faab!==null?`<div style="font-size:12px;color:var(--gold);">FAAB: $${faab}</div>`:''}
-        <div style="font-size:11px;color:var(--chalk-dim);">${bids} staged bid${bids===1?'':'s'}</div>
-      </div>
-    </div>`;
-  }
-
-function renderWaiverBidsSummary(week){
-    const bids = (state.waiverBids||[]).filter(b => b.week === week);
-    if(!bids.length) return '<div style="color:var(--chalk-faint); font-size:12px;">No bids staged for this week yet.</div>';
-    const total = bids.reduce((s,b) => s + (parseFloat(b.amount)||0), 0);
-    return `
-      <div class="overview-list">
-        ${bids.map(b => {
-          const info = playerLabel(b.playerId);
-          return `
-            <div class="overview-row" style="cursor:default;">
-              <div class="overview-main">
-                <div class="overview-league-name">${info?info.name:b.playerId}</div>
-                <div class="overview-payouts">${b.leagueName} · $${(parseFloat(b.amount)||0).toFixed(0)} FAAB</div>
-              </div>
-              <button class="btn-danger-ghost" data-remove-bid="${b.id}">Remove</button>
-            </div>
-          `;
-        }).join('')}
-      </div>
-      <div class="empty-note" style="margin-top:10px;">Total staged: $${total.toFixed(0)} across ${bids.length} bid${bids.length===1?'':'s'}.</div>
-    `;
-  }
-
-  function bindWaiverHub(){
-    const week = getProjectionWeek();
-    state.leagues.forEach(lg => {
-      const el = document.getElementById('waiver-open-' + lg.league_id);
-      if(el) el.addEventListener('click', () => {
-        state.waiverHubLeagueId = lg.league_id;
-        state.view = 'waiverHubDetail';
-        render();
-      });
-    });
-    document.querySelectorAll('[data-stage-bid]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const playerId = btn.dataset.stageBid;
-        const leagueId = btn.dataset.leagueId;
-        const leagueName = btn.dataset.leagueName;
-        const rowEl = document.getElementById('waiver-row-' + leagueId + '-' + playerId);
-        if(!rowEl) return;
-        rowEl.innerHTML = `
-          <div style="flex:1; font-size:12px;">FAAB amount for this bid:</div>
-          <input type="number" min="0" id="bid-amount-input" style="width:80px; background:var(--bg); border:1px solid var(--line-strong); color:var(--chalk); padding:6px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace;"/>
-          <button class="btn btn-primary" id="bid-confirm-btn" style="font-size:11px; padding:5px 10px; margin-left:8px;">Confirm</button>
-          <button class="btn btn-ghost" id="bid-cancel-btn" style="font-size:11px; padding:5px 10px;">Cancel</button>
-        `;
-        document.getElementById('bid-confirm-btn').addEventListener('click', async () => {
-          const amount = document.getElementById('bid-amount-input').value;
-          if(amount === '') return;
-          if(!state.waiverBids) state.waiverBids = [];
-          state.waiverBids.push({id: Date.now()+'-'+Math.random().toString(36).slice(2), week, leagueId, leagueName, playerId, amount});
-          await saveWaiverBids(state.waiverBids);
-          toast('Bid staged');
-          const summaryEl = document.getElementById('waiver-bids-summary');
-          if(summaryEl) summaryEl.innerHTML = renderWaiverBidsSummary(week);
-          bindWaiverBidRemovals();
-          render();
-        });
-        document.getElementById('bid-cancel-btn').addEventListener('click', () => render());
-      });
-    });
-    bindWaiverBidRemovals();
-  }
-
-  function bindWaiverBidRemovals(){
-    document.querySelectorAll('[data-remove-bid]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const id = btn.dataset.removeBid;
-        state.waiverBids = (state.waiverBids||[]).filter(b => b.id !== id);
-        await saveWaiverBids(state.waiverBids);
-        document.getElementById('waiver-bids-summary').innerHTML = renderWaiverBidsSummary(getProjectionWeek());
-        bindWaiverBidRemovals();
-      });
-    });
-  }
-
-  function renderWaiverHubDetail(){
-    const lg = state.leagues.find(l => l.league_id === state.waiverHubLeagueId);
-    const detail = state.leagueDetail[state.waiverHubLeagueId];
-    if(!lg || !detail){
-      return renderWaiverHub();
-    }
-    const week = getProjectionWeek();
-    const {groups} = buildWaiverCandidatesByPosition(detail);
-
-    app.innerHTML = `
-      ${renderTopbar(true)}
-      <div class="body-scroll">
-        <button class="btn btn-ghost" id="btn-back-to-waiverhub" style="margin-bottom:14px;">← All Leagues Waiver Wire</button>
-        <div class="section-title">${lg.name} — Full Waiver Board (Week ${week})</div>
-        <div class="field" style="max-width:320px; margin-bottom:10px;">
-         <label>Search all waiver players</label>
-          <input id="waiver-detail-search" type="text" placeholder="e.g. player name"/>
-        </div>
-
-        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
-         <button class="btn btn-ghost btn-mini" data-waiver-filter="ALL">ALL</button>
-         <button class="btn btn-ghost btn-mini" data-waiver-filter="QB">QB</button>
-         <button class="btn btn-ghost btn-mini" data-waiver-filter="RB">RB</button>
-         <button class="btn btn-ghost btn-mini" data-waiver-filter="WR">WR</button>
-         <button class="btn btn-ghost btn-mini" data-waiver-filter="TE">TE</button>
-        </div>
-
-        <div id="waiver-detail-results" style="max-height:640px; overflow-y:auto; padding-right:4px;"></div>
-      </div>
-    `;
-    bindTopbar();
-    document.getElementById('btn-back-to-waiverhub').addEventListener('click', () => {
-      state.view = 'waiverHub';
-      render();
-    });
-    let waiverPositionFilter = 'ALL';
-    function paint(query){
-      const q = query.trim().toLowerCase();
-      const resultsEl = document.getElementById('waiver-detail-results');
-      const html = WAIVER_POSITIONS
-        .filter(pos => groups[pos].length)
-       .filter(pos => waiverPositionFilter === 'ALL' || pos === waiverPositionFilter)
-        .map(pos => {
-        const filtered = q ? groups[pos].filter(p => p.name.toLowerCase().includes(q)) : groups[pos];
-        if(!filtered.length) return '';
-        return `
-          <div style="margin-bottom:22px;">
-            <div class="roster-group-title">${pos}${q ? ` <span style="text-transform:none; letter-spacing:0; color:var(--chalk-faint);">(${filtered.length} match${filtered.length===1?'':'es'})</span>` : ''}</div>
-            <div class="roster-list">
-              ${filtered.map(p => `
-                <div class="player-row" id="waiver-row-${lg.league_id}-${p.pid}">
-                  <div class="slot-tag ${slotColorClass(pos)}">${pos}</div>
-                  <div class="player-name ${nameColorClass(pos)}" style="flex:1;">${playerNameHTML(p)} <span style="color:var(--chalk-faint); font-size:11px;">${p.team}</span></div>
-                  <div class="player-meta" style="width:170px;">${p.proj!=null ? `<span style="color:var(--gold);">Proj ${p.proj.toFixed(1)}</span>` : ''}${p.adds ? ` · +${p.adds} adds` : ''}</div>
-                  <button class="btn btn-primary" data-stage-bid="${p.pid}" data-league-id="${lg.league_id}" data-league-name="${lg.name}" style="font-size:11px; padding:5px 10px;">Bid</button>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        `;
-      }).join('');
-      resultsEl.innerHTML = html || '<div style="color:var(--chalk-faint); font-size:13px;">No matching players.</div>';
-      bindWaiverHub();
-    }
-
-    paint('');
-
-document.getElementById('waiver-detail-search')
-  .addEventListener('input', (e) => paint(e.target.value));
-
-document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
-  btn.addEventListener('click', () => {
-
-    waiverPositionFilter = btn.dataset.waiverFilter;
-
-    document.querySelectorAll('[data-waiver-filter]').forEach(b => {
-      b.classList.remove('btn-primary');
-      b.classList.add('btn-ghost');
-    });
-
-    btn.classList.remove('btn-ghost');
-    btn.classList.add('btn-primary');
-
-    paint(document.getElementById('waiver-detail-search').value);
-  });
-});
-}
-
-  async function renderPlayerShares(){
-    renderLoading('Building your player shares...');
-    await ensurePlayersLoaded();
-    for(const lg of state.leagues){
-      if(!state.leagueDetail[lg.league_id]){
-        try{
-          state.leagueDetail[lg.league_id] = await loadLeagueDetail(lg.league_id, state.sleeperUserId);
-        }catch(e){ /* league skipped if it fails to load */ }
-      }
-    }
-    if(!state.sharesMainTab) state.sharesMainTab = 'all';
-    if(!state.sharesSubTab) state.sharesSubTab = 'all';
-    if(!state.sharesThirdTab) state.sharesThirdTab = 'all';
-    paintPlayerShares();
-  }
-
-  function scopedLeaguesForShares(){
-    const nonDynasty = state.leagues.filter(lg => !isDynastyLeague(lg.name));
-    if(state.sharesMainTab === 'all') return state.leagues;
-    if(state.sharesMainTab === 'dynasty') return state.leagues.filter(lg => isDynastyLeague(lg.name));
-    if(state.sharesSubTab === 'guillotine') return nonDynasty.filter(lg => isGuillotineLeague(lg.name));
-    if(state.sharesSubTab === 'redraft'){
-      const trueRedraft = nonDynasty.filter(lg => !isGuillotineLeague(lg.name));
-      if(state.sharesThirdTab === 'managed') return trueRedraft.filter(lg => categoryForLeagueName(lg.name) === 'Redraft (Managed)');
-      if(state.sharesThirdTab === 'unmanaged') return trueRedraft.filter(lg => categoryForLeagueName(lg.name) === 'Redraft (Unmanaged)');
-      return trueRedraft; // 'all'
-    }
-    return nonDynasty; // redraft top-level 'all'
-  }
 
   function isDraftComplete(detail){
     const status = detail && detail.league && detail.league.status;
     return !!status && status !== 'pre_draft' && status !== 'drafting';
-  }
-
-  function buildShareList(leaguesScope){
-    const shareMap = {};
-    leaguesScope.forEach(lg => {
-      const detail = state.leagueDetail[lg.league_id];
-      if(!detail) return;
-      const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
-      if(!myRoster) return;
-      (myRoster.players || []).forEach(pid => {
-        if(!shareMap[pid]) shareMap[pid] = {count:0, leagues:[]};
-        shareMap[pid].count++;
-        shareMap[pid].leagues.push(lg.name);
-      });
-    });
-    const draftedLeagues = leaguesScope.filter(lg => isDraftComplete(state.leagueDetail[lg.league_id]));
-    const totalDrafted = draftedLeagues.length;
-    return Object.keys(shareMap).map(pid => {
-      const info = playerLabel(pid);
-      const count = shareMap[pid].count;
-      const pct = totalDrafted > 0 ? (count / totalDrafted * 100) : 0;
-      return {pid, info, count, pct, leagues: shareMap[pid].leagues};
-    }).sort((a,b) => b.count - a.count || (a.info?a.info.name:'').localeCompare(b.info?b.info.name:''));
-  }
-
-  function paintPlayerShares(){
-    const scopeLeagues = scopedLeaguesForShares();
-    const list = buildShareList(scopeLeagues);
-
-    app.innerHTML = `
-      ${renderTopbar(true)}
-      <div class="body-scroll">
-        <div class="section-title">Player Shares</div>
-        <div class="tabs">
-          <div class="tab ${state.sharesMainTab==='all'?'active':''}" data-main="all">All</div>
-          <div class="tab ${state.sharesMainTab==='dynasty'?'active':''}" data-main="dynasty">Dynasty Leagues</div>
-          <div class="tab ${state.sharesMainTab==='redraft'?'active':''}" data-main="redraft">Redraft Leagues</div>
-        </div>
-        ${state.sharesMainTab==='redraft' ? `
-        <div class="tabs" style="margin-top:2px;">
-          <div class="tab ${state.sharesSubTab==='all'?'active':''}" data-sub="all">All</div>
-          <div class="tab ${state.sharesSubTab==='guillotine'?'active':''}" data-sub="guillotine">Guillotine</div>
-          <div class="tab ${state.sharesSubTab==='redraft'?'active':''}" data-sub="redraft">Redraft</div>
-        </div>` : ''}
-        ${state.sharesMainTab==='redraft' && state.sharesSubTab==='redraft' ? `
-        <div class="tabs" style="margin-top:2px;">
-          <div class="tab ${state.sharesThirdTab==='all'?'active':''}" data-third="all">All</div>
-          <div class="tab ${state.sharesThirdTab==='managed'?'active':''}" data-third="managed">Managed</div>
-          <div class="tab ${state.sharesThirdTab==='unmanaged'?'active':''}" data-third="unmanaged">Unmanaged</div>
-        </div>` : ''}
-        <div class="empty-note" style="margin:14px 0;">How many of your leagues in this view (${scopeLeagues.length} league${scopeLeagues.length===1?'':'s'}) each player is on your roster in — includes bench and IR. Percentage is out of leagues that have finished drafting only. Highest share first.</div>
-        <div class="field" style="max-width:320px; margin-bottom:18px;">
-          <label>Search all waiver players</label>
-          <input id="shares-search" type="text" placeholder="e.g. Justin Herbert"/>
-        </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"><button class="btn btn-primary" data-share-filter="1">All</button><button class="btn btn-ghost" data-share-filter="2">2+ Leagues</button><button class="btn btn-ghost" data-share-filter="3">3+ Leagues</button><button class="btn btn-ghost" data-share-filter="5">5+ Leagues</button></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"><button class="btn btn-primary" data-position-filter="ALL">All Positions</button><button class="btn btn-ghost" data-position-filter="QB">QB</button><button class="btn btn-ghost" data-position-filter="RB">RB</button><button class="btn btn-ghost" data-position-filter="WR">WR</button><button class="btn btn-ghost" data-position-filter="TE">TE</button></div><div id="shares-list"></div>
-      </div>
-    `;
-    bindTopbar();
-
-    document.querySelectorAll('[data-main]').forEach(t => t.addEventListener('click', ()=>{
-      state.sharesMainTab = t.dataset.main;
-      state.sharesSubTab = 'all';
-      state.sharesThirdTab = 'all';
-      paintPlayerShares();
-    }));
-    document.querySelectorAll('[data-sub]').forEach(t => t.addEventListener('click', ()=>{
-      state.sharesSubTab = t.dataset.sub;
-      state.sharesThirdTab = 'all';
-      paintPlayerShares();
-    }));
-    document.querySelectorAll('[data-third]').forEach(t => t.addEventListener('click', ()=>{
-      state.sharesThirdTab = t.dataset.third;
-      paintPlayerShares();
-    }));
-
-    function paintList(query){
-      const q = query.trim().toLowerCase();
-      const minShares = state.shareMinFilter || 1; const posFilter = state.sharePositionFilter || "ALL"; const base=(q ? list.filter(p => p.info && p.info.name.toLowerCase().includes(q)) : list); const filtered=base.filter(p=>p.count>=minShares).filter(p=>posFilter==="ALL" || (p.info && p.info.pos===posFilter));
-      const grouped={QB:[],RB:[],WR:[],TE:[],OTHER:[]}; filtered.forEach(p=>{const k=(p.info&&['QB','RB','WR','TE'].includes(p.info.pos))?p.info.pos:'OTHER'; grouped[k].push(p);}); document.getElementById('shares-list').innerHTML = ['QB','RB','WR','TE','OTHER'].map(pos=>{ const arr=grouped[pos]; if(!arr.length) return ''; return `<div style="margin-bottom:20px;"><div class="roster-group-title">${pos==='OTHER'?'Other Positions':pos+' Exposure'}</div><div class="roster-list">${arr.map(p => `
-            <div class="player-row">
-              <div class="slot-tag ${slotColorClass(p.info?p.info.pos:'')}">${p.info?p.info.pos:'?'}</div>
-              <div style="flex:1; min-width:0;">
-                <div class="player-name ${p.info?nameColorClass(p.info.pos):''}">${p.info?playerNameHTML(p.info):p.pid}</div>
-                <div style="font-size:11px; color:var(--chalk-faint); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${p.leagues.join(', ')}</div>
-              </div>
-              <div style="text-align:right; flex-shrink:0; min-width:74px;">
-                <div class="scoreboard-num" style="font-size:22px;">${p.pct.toFixed(0)}%</div>
-                <div style="font-size:10px; color:var(--chalk-faint);">${p.count} share${p.count===1?'':'s'}</div>
-              </div>
-            </div>
-          `).join('')}</div></div>`;}).join('') || '<div style="color:var(--chalk-faint); font-size:13px; padding:12px 2px;">No players match your search.</div>';
-    }
-
-    paintList('');
-    document.getElementById('shares-search').addEventListener('input', (e) => paintList(e.target.value)); document.querySelectorAll('[data-position-filter]').forEach(btn=>btn.addEventListener('click',()=>{state.sharePositionFilter=btn.dataset.positionFilter; document.querySelectorAll('[data-position-filter]').forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');}); btn.classList.remove('btn-ghost'); btn.classList.add('btn-primary'); paintList(document.getElementById('shares-search').value);})); document.querySelectorAll('[data-share-filter]').forEach(btn=>btn.addEventListener('click',()=>{state.shareMinFilter=parseInt(btn.dataset.shareFilter,10); document.querySelectorAll('[data-share-filter]').forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');}); btn.classList.remove('btn-ghost'); btn.classList.add('btn-primary'); paintList(document.getElementById('shares-search').value);}));
   }
 
   // Leagues with no real money on the line — no buy-in/payout tracking needed for these.
@@ -1421,45 +768,6 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     return PLANNER_LEAGUE_NAMES.some(n => lower.includes(n));
   }
 
-  // Feature 2: user-entered matchup difficulty rankings (1=hardest, 32=easiest),
-  // one ranking set per position (QB/RB/WR/TE/DEF). Stored once, globally —
-  // these describe NFL defenses, not anything league-specific.
-  const RANKING_POSITIONS = ['QB','RB','WR','TE','DEF'];
-  async function loadMatchupRankings(){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'matchupRankings');
-      return v ? JSON.parse(v) : {};
-    }catch(e){ return {}; }
-  }
-  async function saveMatchupRankings(data){
-    try{ localStorage.setItem(APP_PREFIX + 'matchupRankings', JSON.stringify(data)); }catch(e){}
-  }
-  function getMatchupDifficulty(pos, oppTeam){
-    const table = state.matchupRankings && state.matchupRankings[pos];
-    if(!table) return null;
-    const r = table[oppTeam];
-    return (r === '' || r == null) ? null : parseInt(r, 10);
-  }
-  // 1 (hardest) -> dark red, 32 (easiest) -> dark green, through orange/yellow between.
-  function rankColor(rank){
-    if(rank == null || isNaN(rank)) return null;
-    const clamped = Math.max(1, Math.min(32, rank));
-    const hue = (clamped - 1) / 31 * 120;
-    return `hsl(${hue.toFixed(0)}, 68%, 34%)`;
-  }
-
-  // Feature 3: planned FAAB bids — a personal checklist, not a real Sleeper
-  // waiver claim. {leagueId, leagueName, week, playerId, amount}
-  async function loadWaiverBids(){
-    try{
-      const v = localStorage.getItem(APP_PREFIX + 'waiverBids');
-      return v ? JSON.parse(v) : [];
-    }catch(e){ return []; }
-  }
-  async function saveWaiverBids(bids){
-    try{ localStorage.setItem(APP_PREFIX + 'waiverBids', JSON.stringify(bids)); }catch(e){}
-  }
-
   async function renderLeagueDetail(){
     const detail = state.leagueDetail[state.currentLeagueId];
     const lg = state.leagues.find(l => l.league_id === state.currentLeagueId);
@@ -1469,6 +777,7 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     const plannerLeague = isPlannerLeague(lg.name);
     if(free && state.currentTab === 'payouts'){ state.currentTab = 'standings'; }
     if(guillotineFmt && state.currentTab === 'matchup'){ state.currentTab = 'standings'; }
+    if(!guillotineFmt && state.currentTab === 'command'){ state.currentTab = 'standings'; }
 
     app.innerHTML = `
       ${renderTopbar(true)}
@@ -1482,6 +791,7 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
           <div class="tab ${state.currentTab==='standings'?'active':''}" data-tab="standings">Standings</div>
           <div class="tab ${state.currentTab==='rosters'?'active':''}" data-tab="rosters">Rosters</div>
           ${guillotineFmt ? '' : `<div class="tab ${state.currentTab==='matchup'?'active':''}" data-tab="matchup">Week ${getProjectionWeek()} Matchup</div>`}
+          ${guillotineFmt ? `<div class="tab ${state.currentTab==='command'?'active':''}" data-tab="command">Command Centre</div>` : ''}
           <div class="tab ${state.currentTab==='waiver'?'active':''}" data-tab="waiver">Waiver Wire</div>
           ${plannerLeague ? `<div class="tab ${state.currentTab==='planner'?'active':''}" data-tab="planner">Season Planner</div>` : ''}
           ${free ? '' : `<div class="tab ${state.currentTab==='payouts'?'active':''}" data-tab="payouts">Buy-in &amp; Payouts</div>`}
@@ -1510,31 +820,17 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
       bindRosterPicker(detail);
     } else if(state.currentTab === 'matchup' && !guillotineFmt){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Week ${getProjectionWeek()} matchup and projections...</div>`;
+      await window.Matchups.renderTab(detail, content);
+    } else if(state.currentTab === 'command' && guillotineFmt){
+      content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Command Centre...</div>`;
       await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
-      if(!detail.matchupsWeek1){
-        try{
-          detail.matchupsWeek1 = await fetchJSON(`https://api.sleeper.app/v1/league/${state.currentLeagueId}/matchups/${getProjectionWeek()}`);
-        }catch(e){
-          detail.matchupsWeek1 = [];
-        }
-      }
-      content.innerHTML = renderMatchupTab(detail);
-      bindMatchupTab(detail);
+      window.Guillotine.renderCommandCentre(detail, content);
     } else if(state.currentTab === 'waiver'){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading player pool, trending adds, and projections...</div>`;
-      await Promise.all([ensurePlayersLoaded(), ensureTrendingLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
-      content.innerHTML = renderWaiverWireTab(detail);
+      await window.Waivers.renderTab(detail, content);
     } else if(state.currentTab === 'planner' && plannerLeague){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading planner data...</div>`;
-      if(!state.plannerWeek) state.plannerWeek = getProjectionWeek();
-      if(!state.plannerSubView) state.plannerSubView = 'lineup';
-      if(!state.matchupRankings) state.matchupRankings = await loadMatchupRankings();
-      await Promise.all([ensurePlayersLoaded(), ensurePlannerProjectionsForWeek(state.plannerWeek).catch(()=>null)]);
-      if(!detail.plannerMoves){
-        detail.plannerMoves = await loadPlannerMoves(state.currentLeagueId);
-      }
-      content.innerHTML = renderSeasonPlannerTab(detail);
-      bindSeasonPlannerTab(detail);
+      await window.Planner.renderTab(detail, content);
     } else if(state.currentTab === 'payouts' && !free){
       content.innerHTML = renderPayoutsTab(detail, lg.name);
       bindPayoutsForm(detail, lg.name);
@@ -1659,7 +955,6 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
       ` : ''}
       ${leagueBudget > 0 && myRow ? `<div class="empty-note">Your share vs. an equal split tells you whether you're FAAB-rich or FAAB-poor relative to the field — above the equal-split number means you have more buying power than average, below means less.</div>` : ''}
       <div class="empty-note" style="margin-top:8px;">Sleeper doesn't track eliminations for guillotine leagues, so mark teams cut yourself as they go — it's saved to this league from then on.</div>
-      <div class="empty-note" style="margin-top:14px;">Sleeper doesn't track eliminations for guillotine leagues, so mark teams cut yourself as they go — it's saved to this league from then on.</div>
     `;
   }
 
@@ -1671,7 +966,7 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
           const set = new Set(detail.cutRosters || []);
           set.add(rid);
           detail.cutRosters = Array.from(set);
-          await saveCutRosters(state.currentLeagueId, detail.cutRosters);
+          await Storage.saveCutRosters(state.currentLeagueId, detail.cutRosters);
           document.getElementById('tab-content').innerHTML = renderGuillotineStandingsTab(detail);
           rebind();
         });
@@ -1680,7 +975,7 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
         btn.addEventListener('click', async ()=>{
           const rid = parseInt(btn.dataset.restore, 10);
           detail.cutRosters = (detail.cutRosters || []).filter(x => x !== rid);
-          await saveCutRosters(state.currentLeagueId, detail.cutRosters);
+          await Storage.saveCutRosters(state.currentLeagueId, detail.cutRosters);
           document.getElementById('tab-content').innerHTML = renderGuillotineStandingsTab(detail);
           rebind();
         });
@@ -1690,553 +985,10 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
   }
 
 
-  const WAIVER_POSITIONS = ['QB','RB','WR','TE','K','DEF'];
-
   function computeOwnedPlayerIds(detail){
     const owned = new Set();
     detail.rosters.forEach(r => (r.players || []).forEach(pid => owned.add(pid)));
     return owned;
-  }
-
-  function findMatchupPair(detail){
-    const matchups = detail.matchupsWeek1 || [];
-    const mine = matchups.find(m => m.roster_id === detail.myRosterId);
-    if(!mine) return null;
-    const opp = matchups.find(m => m.matchup_id === mine.matchup_id && m.roster_id !== mine.roster_id);
-    return {mine, opp};
-  }
-
-  function renderMatchupPanel(teamKey, opt, league){
-    const total = lineupTotal(opt.assignment, opt.pool);
-    const usedElsewhereBase = opt.assignment;
-    const rowsHTML = opt.slotOrder.map((slot, i) => {
-      const pid = opt.assignment[i];
-      const eligible = SLOT_ELIGIBILITY[slot] || [slot];
-      const usedElsewhere = new Set(usedElsewhereBase.filter((v, idx) => idx !== i && v));
-      const candidates = opt.pool
-        .filter(p => eligible.includes(p.pos))
-        .filter(p => !usedElsewhere.has(p.pid) || p.pid === pid)
-        .sort((a,b) => b.proj - a.proj);
-      const optionsHTML = candidates.map(p => `<option value="${p.pid}" ${p.pid===pid?'selected':''}>${p.info?p.info.name:p.pid} (${p.pos}) — ${p.hasProj?p.proj.toFixed(1):'—'} pts</option>`).join('');
-      const chosen = opt.pool.find(p => p.pid === pid);
-      const ptsDisplay = chosen ? (chosen.hasProj ? chosen.proj.toFixed(1) : '—') : '0.0';
-      return `
-        <div class="matchup-slot-row">
-          <div class="slot-tag ${slotColorClass(slot)}">${slotLabel(slot)}</div>
-          <select class="matchup-select" data-team="${teamKey}" data-slot="${i}">
-            ${!pid ? '<option value="" selected>— Empty —</option>' : ''}${optionsHTML}
-          </select>
-          <div class="mono" style="width:48px; text-align:right; color:var(--chalk-dim); font-size:12px;">${ptsDisplay}</div>
-        </div>
-      `;
-    }).join('');
-
-    const usedSet = new Set(opt.assignment.filter(Boolean));
-    const bench = opt.pool.filter(p => !usedSet.has(p.pid)).sort((a,b) => b.proj - a.proj);
-    const benchHTML = bench.length ? bench.map(p => `
-      <div class="matchup-slot-row">
-        <div class="slot-tag tag-grey">BN</div>
-        <div class="player-name ${nameColorClass(p.pos)}" style="flex:1; font-size:12.5px;">${p.info ? playerNameHTML(p.info) : p.pid}</div>
-        <div class="mono" style="width:48px; text-align:right; color:var(--chalk-dim); font-size:12px;">${p.hasProj ? p.proj.toFixed(1) : '—'}</div>
-      </div>
-    `).join('') : '<div style="color:var(--chalk-faint); font-size:12px; padding:4px 0;">Nobody left on the bench.</div>';
-
-    return `
-      <div class="matchup-panel" id="matchup-panel-${teamKey}">
-        <div class="matchup-panel-header">
-          ${avatarHTML(opt.user && opt.user.avatar, opt.user && opt.user.display_name, 32)}
-          <div>
-            <div class="matchup-team-name">${opt.teamName}</div>
-            <div class="owner-name">${opt.user ? opt.user.display_name : 'Unknown'}</div>
-          </div>
-        </div>
-        <div class="matchup-total" id="matchup-total-${teamKey}">${total.toFixed(1)}<span style="font-size:12px; color:var(--chalk-faint); font-family:'Inter',sans-serif;"> pts</span></div>
-        <div class="matchup-slots">${rowsHTML}</div>
-        <div class="roster-group-title" style="margin-top:16px;">Bench</div>
-        <div class="matchup-slots">${benchHTML}</div>
-      </div>
-    `;
-  }
-
-  function renderMatchupTab(detail){
-    if(!detail.myRosterId){
-      return `<div class="empty-note">Couldn't find your team in this league.</div>`;
-    }
-    const pair = findMatchupPair(detail);
-    if(!pair || !pair.opp){
-      detail.matchupState = null;
-      return `<div class="empty-note">Week ${getProjectionWeek()} matchups haven't been generated for this league yet — Sleeper publishes the schedule closer to the season starting. Check back later.</div>`;
-    }
-    const myRoster = detail.rosters.find(r => r.roster_id === pair.mine.roster_id);
-    const oppRoster = detail.rosters.find(r => r.roster_id === pair.opp.roster_id);
-    const myUser = detail.usersById[myRoster.owner_id];
-    const oppUser = detail.usersById[oppRoster.owner_id];
-
-    detail.matchupState = {
-      my: {...computeOptimalLineup(myRoster, detail.league), teamName: teamDisplayName(myUser, myRoster) + ' (You)', user: myUser},
-      opp: {...computeOptimalLineup(oppRoster, detail.league), teamName: teamDisplayName(oppUser, oppRoster), user: oppUser},
-    };
-
-    return `
-      <div class="empty-note" style="margin-bottom:14px;">Both lineups are auto-built from Week ${getProjectionWeek()} projections into each team's best possible starting lineup. Use the dropdowns to swap any player and see how each total — and the edge — changes.</div>
-      <div id="matchup-edge" style="margin-bottom:14px;"></div>
-      <div class="matchup-grid">
-        ${renderMatchupPanel('my', detail.matchupState.my, detail.league)}
-        <div class="matchup-vs">VS</div>
-        ${renderMatchupPanel('opp', detail.matchupState.opp, detail.league)}
-      </div>
-    `;
-  }
-
-  function bindMatchupTab(detail){
-    if(!detail.matchupState) return;
-
-    function updateEdge(){
-      const edgeEl = document.getElementById('matchup-edge');
-      if(!edgeEl) return;
-      const myTotal = lineupTotal(detail.matchupState.my.assignment, detail.matchupState.my.pool);
-      const oppTotal = lineupTotal(detail.matchupState.opp.assignment, detail.matchupState.opp.pool);
-      const diff = myTotal - oppTotal;
-      if(Math.abs(diff) < 0.05){
-        edgeEl.innerHTML = `<span class="pill">Dead even</span>`;
-      } else if(diff > 0){
-        edgeEl.innerHTML = `<span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">You're projected ahead by ${diff.toFixed(1)} pts</span>`;
-      } else {
-        edgeEl.innerHTML = `<span class="pill" style="background:rgba(232,92,74,0.15); color:#E85C4A;">Behind by ${Math.abs(diff).toFixed(1)} pts</span>`;
-      }
-    }
-
-    function bindPanel(teamKey){
-      document.querySelectorAll(`select[data-team="${teamKey}"]`).forEach(sel => {
-        sel.addEventListener('change', () => {
-          const slotIdx = parseInt(sel.dataset.slot, 10);
-          detail.matchupState[teamKey].assignment[slotIdx] = sel.value || null;
-          const panelEl = document.getElementById('matchup-panel-' + teamKey);
-          panelEl.outerHTML = renderMatchupPanel(teamKey, detail.matchupState[teamKey], detail.league);
-          bindPanel(teamKey);
-          updateEdge();
-        });
-      });
-    }
-
-    bindPanel('my');
-    bindPanel('opp');
-    updateEdge();
-  }
-
-  function computeEffectiveRosterPids(basePids, moves, week){
-    let pids = [...basePids];
-    const applicable = moves.filter(m => m.week <= week).sort((a,b) => a.week - b.week);
-    applicable.forEach(m => {
-      if(m.dropPid) pids = pids.filter(p => p !== m.dropPid);
-      if(m.addPid && !pids.includes(m.addPid)) pids.push(m.addPid);
-    });
-    return pids;
-  }
-
-  function getInjuryBadge(pid){
-    const p = state.playersCache ? state.playersCache[pid] : null;
-    const status = p && p.injury_status;
-    if(!status) return '';
-    const color = (status === 'Out' || status === 'IR' || status === 'PUP') ? '#E85C4A' : '#E0A458';
-    return ` <span style="color:${color}; font-size:10px; font-weight:700; border:1px solid ${color}; border-radius:4px; padding:1px 4px;">${status.toUpperCase()}</span>`;
-  }
-
-  function plannerMatchupText(pid, week){
-    const info = playerLabel(pid);
-    if(!info || !info.team || info.team === 'FA') return '';
-    if(BYE_WEEKS[info.team] === week) return '<span style="color:var(--chalk-faint);">BYE</span>';
-    const m = getMatchup(info.team, week);
-    if(!m) return '<span style="color:var(--chalk-faint);">—</span>';
-    const rank = getMatchupDifficulty(info.pos, m.opp);
-    const color = rankColor(rank);
-    const badge = color ? ` <span style="background:${color}; color:#fff; padding:0 4px; border-radius:3px; font-size:10px; font-weight:700;">${rank}</span>` : '';
-    return `vs ${m.opp}${badge}`;
-  }
-
-  function renderPlannerLineupSection(detail){
-    const st = detail.plannerState;
-    const total = lineupTotal(st.assignment, st.pool);
-    const usedSet = new Set(st.assignment.filter(Boolean));
-    const bench = st.pool.filter(p => !usedSet.has(p.pid)).sort((a,b) => b.proj - a.proj);
-
-    const slotRows = st.slotOrder.map((slot,i) => {
-      const pid = st.assignment[i];
-      const eligible = SLOT_ELIGIBILITY[slot] || [slot];
-      const usedElsewhere = new Set(st.assignment.filter((v,idx)=>idx!==i && v));
-      const candidates = st.pool.filter(p => eligible.includes(p.pos)).filter(p => !usedElsewhere.has(p.pid) || p.pid===pid).sort((a,b)=>b.proj-a.proj);
-      const optionsHTML = candidates.map(p => `<option value="${p.pid}" ${p.pid===pid?'selected':''}>${p.info?p.info.name:p.pid} (${p.pos}) — ${p.hasProj?p.proj.toFixed(1):'—'} pts</option>`).join('');
-      const chosen = st.pool.find(p=>p.pid===pid);
-      return `
-        <div class="matchup-slot-row">
-          <div class="slot-tag ${slotColorClass(slot)}">${slotLabel(slot)}</div>
-          <select class="matchup-select" data-planner-slot="${i}">
-            ${!pid ? '<option value="" selected>— Empty —</option>' : ''}${optionsHTML}
-          </select>
-          <div style="width:90px; font-size:11px; color:var(--chalk-dim);">${pid ? plannerMatchupText(pid, st.week) : ''}${pid?getInjuryBadge(pid):''}</div>
-          <div class="mono" style="width:44px; text-align:right; color:var(--chalk-dim); font-size:12px;">${chosen ? (chosen.hasProj?chosen.proj.toFixed(1):'—') : '0.0'}</div>
-        </div>
-      `;
-    }).join('');
-
-    const benchHTML = bench.map(p => `
-      <div class="matchup-slot-row">
-        <div class="slot-tag tag-grey">BN</div>
-        <div class="player-name ${p.info?nameColorClass(p.info.pos):''}" style="flex:1; font-size:12.5px;">${p.info?playerNameHTML(p.info):p.pid}</div>
-        <div style="width:90px; font-size:11px; color:var(--chalk-dim);">${plannerMatchupText(p.pid, st.week)}${getInjuryBadge(p.pid)}</div>
-        <div class="mono" style="width:44px; text-align:right; color:var(--chalk-dim); font-size:12px;">${p.hasProj?p.proj.toFixed(1):'—'}</div>
-      </div>
-    `).join('') || '<div style="color:var(--chalk-faint); font-size:12px; padding:6px 0;">Nobody on the bench.</div>';
-
-    return `
-      <div class="matchup-total" id="planner-total" style="margin-bottom:14px;">${total.toFixed(1)}<span style="font-size:12px; color:var(--chalk-faint); font-family:'Inter',sans-serif;"> pts — Week ${st.week} plan</span></div>
-      <div class="roster-group-title">Starting Lineup</div>
-      <div class="matchup-slots" style="margin-bottom:18px;">${slotRows}</div>
-      <div class="roster-group-title">Bench</div>
-      <div class="matchup-slots" style="margin-bottom:22px;">${benchHTML}</div>
-    `;
-  }
-
-  function renderPlannerLineupView(detail){
-    const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
-    if(!myRoster) return `<div class="empty-note">Couldn't find your team in this league.</div>`;
-    const week = state.plannerWeek;
-    const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
-    const basePids = (myRoster.players || []).filter(pid => !excluded.has(pid));
-    const effectivePids = computeEffectiveRosterPids(basePids, detail.plannerMoves, week);
-    const lineup = computePlannerLineup(effectivePids, detail.league, week);
-    detail.plannerState = {week, slotOrder: lineup.slotOrder, assignment: lineup.assignment, pool: lineup.pool};
-
-    const weekButtons = Array.from({length:18}, (_,i)=>i+1).map(w =>
-      `<button class="btn ${w===week?'btn-primary':'btn-ghost'}" data-planner-week="${w}" style="padding:5px 9px; font-size:12px;">${w}</button>`
-    ).join('');
-
-    const movesThisFar = detail.plannerMoves.slice().sort((a,b)=>a.week-b.week);
-    const movesHTML = movesThisFar.length ? movesThisFar.map((m,idx) => {
-      const addInfo = playerLabel(m.addPid);
-      const dropInfo = playerLabel(m.dropPid);
-      return `
-        <div class="overview-row" style="cursor:default; padding:10px 14px;">
-          <div class="overview-main">
-            <div style="font-size:12px;"><strong>Week ${m.week}:</strong> +${addInfo?addInfo.name:m.addPid} / −${dropInfo?dropInfo.name:m.dropPid}</div>
-          </div>
-          <button class="btn-danger-ghost" data-remove-move="${idx}">Undo</button>
-        </div>
-      `;
-    }).join('') : '<div style="color:var(--chalk-faint); font-size:12px;">No planned moves yet.</div>';
-
-    return `
-      <div class="empty-note" style="margin-bottom:10px;">
-        Plan your lineup week by week and test out waiver moves before making them for real — this is a personal what-if planner and can't submit anything to Sleeper itself. Matchup shows opponent only (no home/away — ask if you want to know why), pulled from the 2026 schedule; BYE and injury status come straight from Sleeper's own data. Swapping players in the lineup below is a live "what if" — it recalculates instantly but doesn't touch your real roster; use "Add From Waivers" to actually change who's on your team.
-      </div>
-      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px;">${weekButtons}</div>
-      <div id="planner-lineup-section">${renderPlannerLineupSection(detail)}</div>
-
-      <div class="payout-card">
-        <div class="section-title" style="margin-top:0;">Add From Waivers (effective Week ${week} onward)</div>
-        <div class="field" style="max-width:320px;">
-          <label>Search available players</label>
-          <input id="planner-waiver-search" type="text" placeholder="e.g. player name"/>
-        </div>
-        <div id="planner-waiver-results" style="margin-top:10px;"></div>
-      </div>
-
-      <div class="payout-card" style="margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">Planned Moves</div>
-        <div class="overview-list">${movesHTML}</div>
-      </div>
-    `;
-  }
-
-  function renderSeasonPlannerTab(detail){
-    const sub = state.plannerSubView;
-    return `
-      <div class="tabs" style="margin-bottom:16px;">
-        <div class="tab ${sub==='lineup'?'active':''}" data-planner-sub="lineup">Lineup Planner</div>
-        <div class="tab ${sub==='rankings'?'active':''}" data-planner-sub="rankings">Matchup Rankings</div>
-        <div class="tab ${sub==='season'?'active':''}" data-planner-sub="season">Season Overview</div>
-      </div>
-      <div id="planner-subview">
-        ${sub === 'rankings' ? renderMatchupRankingsView() : sub === 'season' ? renderSeasonOverviewView(detail) : renderPlannerLineupView(detail)}
-      </div>
-    `;
-  }
-
-  function bindSeasonPlannerTab(detail){
-    document.querySelectorAll('[data-planner-sub]').forEach(t => t.addEventListener('click', () => {
-      state.plannerSubView = t.dataset.plannerSub;
-      render();
-    }));
-    const sub = state.plannerSubView;
-    if(sub === 'rankings') bindMatchupRankingsView();
-    else if(sub !== 'season') bindPlannerLineupView(detail);
-  }
-
-  function renderMatchupRankingsView(){
-    if(!state.rankingsPositionTab) state.rankingsPositionTab = 'QB';
-    const pos = state.rankingsPositionTab;
-    const table = (state.matchupRankings && state.matchupRankings[pos]) || {};
-    const teams = Object.keys(BYE_WEEKS).sort();
-    const posTabsHTML = RANKING_POSITIONS.map(p =>
-      `<div class="tab ${p===pos?'active':''}" data-ranking-pos="${p}">${p}</div>`
-    ).join('');
-    const rowsHTML = teams.map(team => `
-      <div style="display:flex; align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--line);">
-        <div style="width:48px; font-weight:600; font-size:13px;">${team}</div>
-        <input type="number" min="1" max="32" data-rank-team="${team}" value="${table[team] != null ? table[team] : ''}" placeholder="1-32" style="width:70px; background:var(--bg); border:1px solid var(--line-strong); color:var(--chalk); padding:6px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace;"/>
-        <div id="rank-swatch-${team}" style="width:20px; height:20px; border-radius:4px; background:${rankColor(table[team]) || 'transparent'}; border:1px solid var(--line-strong);"></div>
-      </div>
-    `).join('');
-
-    return `
-      <div class="empty-note" style="margin-bottom:14px;">
-        Enter each team's matchup difficulty for this position: <strong>1 = hardest matchup, 32 = easiest</strong>. These are your own rankings — Sleeper doesn't provide this. Every number 1-32 should be used once per position, but nothing stops you from leaving gaps or duplicates if you're still working through it.
-      </div>
-      <div class="tabs" style="margin-bottom:14px;">${posTabsHTML}</div>
-      <div style="max-width:280px; max-height:520px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:4px 10px;">${rowsHTML}</div>
-      <button class="btn btn-primary" id="btn-save-rankings" style="margin-top:14px;">Save ${pos} Rankings</button>
-    `;
-  }
-
-  function bindMatchupRankingsView(){
-    document.querySelectorAll('[data-ranking-pos]').forEach(t => t.addEventListener('click', () => {
-      state.rankingsPositionTab = t.dataset.rankingPos;
-      document.getElementById('planner-subview').innerHTML = renderMatchupRankingsView();
-      bindMatchupRankingsView();
-    }));
-    document.querySelectorAll('[data-rank-team]').forEach(inp => {
-      inp.addEventListener('input', () => {
-        const swatch = document.getElementById('rank-swatch-' + inp.dataset.rankTeam);
-        if(swatch) swatch.style.background = rankColor(parseInt(inp.value,10)) || 'transparent';
-      });
-    });
-    const saveBtn = document.getElementById('btn-save-rankings');
-    if(saveBtn) saveBtn.addEventListener('click', async () => {
-      const pos = state.rankingsPositionTab;
-      if(!state.matchupRankings) state.matchupRankings = {};
-      const table = {};
-      document.querySelectorAll('[data-rank-team]').forEach(inp => {
-        if(inp.value !== '') table[inp.dataset.rankTeam] = parseInt(inp.value, 10);
-      });
-      state.matchupRankings[pos] = table;
-      await saveMatchupRankings(state.matchupRankings);
-      toast(pos + ' rankings saved');
-    });
-  }
-
-  function renderSeasonOverviewView(detail){
-    const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
-    if(!myRoster) return `<div class="empty-note">Couldn't find your team in this league.</div>`;
-    const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
-    const pids = (myRoster.players || []).filter(pid => !excluded.has(pid));
-    const players = pids.map(pid => ({pid, info: playerLabel(pid)})).filter(p => p.info)
-      .sort((a,b) => (a.info.pos||'').localeCompare(b.info.pos||'') || a.info.name.localeCompare(b.info.name));
-
-    const weekHeaders = Array.from({length:18}, (_,i)=>i+1).map(w => `<th style="min-width:36px;">${w}</th>`).join('');
-    const rows = players.map(p => {
-      const cells = Array.from({length:18}, (_,i) => {
-        const week = i+1;
-        const team = p.info.team;
-        if(!team || team === 'FA') return '<td>—</td>';
-        if(BYE_WEEKS[team] === week) return '<td style="color:var(--chalk-faint); font-size:11px;">BYE</td>';
-        const m = getMatchup(team, week);
-        if(!m) return '<td>—</td>';
-        const rank = getMatchupDifficulty(p.info.pos, m.opp);
-        const color = rankColor(rank);
-        return `<td>${color ? `<span style="background:${color}; color:#fff; padding:1px 5px; border-radius:3px; font-size:10.5px; font-weight:700;">${rank}</span>` : '<span style="color:var(--chalk-faint); font-size:10.5px;">'+m.opp+'</span>'}</td>`;
-      }).join('');
-      return `<tr><td style="text-align:left; white-space:nowrap;"><span class="${nameColorClass(p.info.pos)}" style="font-weight:600;">${p.info.name}</span> <span style="color:var(--chalk-faint); font-size:11px;">${p.info.pos}</span></td>${cells}</tr>`;
-    }).join('');
-
-    return `
-      <div class="empty-note" style="margin-bottom:14px;">Your current roster's matchup difficulty, Week 1 through 18, using the rankings you've entered. Blank/grey cells mean no ranking entered yet for that position.</div>
-      <div style="overflow-x:auto;">
-        <table class="standings-table" style="text-align:center;">
-          <thead><tr><th style="text-align:left;">Player</th>${weekHeaders}</tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  function bindPlannerLineupView(detail){
-    const week = state.plannerWeek;
-
-    document.querySelectorAll('[data-planner-week]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        state.plannerWeek = parseInt(btn.dataset.plannerWeek, 10);
-        const content = document.getElementById('planner-subview');
-        content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Week ${state.plannerWeek} projections...</div>`;
-        await ensurePlannerProjectionsForWeek(state.plannerWeek).catch(()=>null);
-        content.innerHTML = renderPlannerLineupView(detail);
-        bindPlannerLineupView(detail);
-      });
-    });
-
-    function bindLineupSelects(){
-      document.querySelectorAll('[data-planner-slot]').forEach(sel => {
-        sel.addEventListener('change', () => {
-          const slotIdx = parseInt(sel.dataset.plannerSlot, 10);
-          detail.plannerState.assignment[slotIdx] = sel.value || null;
-          document.getElementById('planner-lineup-section').innerHTML = renderPlannerLineupSection(detail);
-          bindLineupSelects();
-        });
-      });
-    }
-    bindLineupSelects();
-
-    document.querySelectorAll('[data-remove-move]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const idx = parseInt(btn.dataset.removeMove, 10);
-        const moves = detail.plannerMoves.slice().sort((a,b)=>a.week-b.week);
-        const target = moves[idx];
-        detail.plannerMoves = detail.plannerMoves.filter(m => m !== target);
-        await savePlannerMoves(state.currentLeagueId, detail.plannerMoves);
-        renderCurrentTab();
-      });
-    });
-
-    function paintWaiverResults(query){
-      const resultsEl = document.getElementById('planner-waiver-results');
-      const q = query.trim().toLowerCase();
-      if(q.length < 2){
-        resultsEl.innerHTML = '<div style="color:var(--chalk-faint); font-size:12px;">Type at least 2 letters of a player\'s name.</div>';
-        return;
-      }
-      const owned = computeOwnedPlayerIds(detail);
-      const alreadyPlanned = new Set(detail.plannerMoves.map(m=>m.addPid));
-      const cache = state.playersCache || {};
-      const matches = [];
-      for(const pid in cache){
-        if(owned.has(pid) || alreadyPlanned.has(pid)) continue;
-        const p = cache[pid];
-        if(!p || !p.full_name) continue;
-        if(p.full_name.toLowerCase().includes(q)){
-          matches.push({pid, name: p.full_name, pos: p.position, team: p.team});
-          if(matches.length >= 15) break;
-        }
-      }
-      resultsEl.innerHTML = matches.length ? matches.map(p => `
-        <div class="player-row">
-          <div class="slot-tag ${slotColorClass(p.pos)}">${p.pos||'?'}</div>
-          <div class="player-name ${nameColorClass(p.pos)}" style="flex:1;">${p.name} <span style="color:var(--chalk-faint); font-size:11px;">${p.team||'FA'}</span></div>
-          <button class="btn btn-primary" data-stage-add="${p.pid}" style="font-size:11px; padding:5px 10px;">Add</button>
-        </div>
-      `).join('') : '<div style="color:var(--chalk-faint); font-size:12px;">No matching available players.</div>';
-
-      resultsEl.querySelectorAll('[data-stage-add]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const addPid = btn.dataset.stageAdd;
-          const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
-          const excluded = new Set([...(myRoster.reserve||[]), ...(myRoster.taxi||[])]);
-          const basePids = (myRoster.players || []).filter(pid => !excluded.has(pid));
-          const effectivePids = computeEffectiveRosterPids(basePids, detail.plannerMoves, week);
-          const dropOptionsHTML = effectivePids.map(pid => {
-            const info = playerLabel(pid);
-            return `<option value="${pid}">${info?info.name:pid} (${info?info.pos:'?'})</option>`;
-          }).join('');
-          resultsEl.innerHTML = `
-            <div class="payout-card">
-              <div style="font-size:13px; margin-bottom:10px;">Adding <strong>${playerLabel(addPid)?playerLabel(addPid).name:addPid}</strong> starting Week ${week}. Who comes off your roster?</div>
-              <div class="field">
-                <label>Drop</label>
-                <select id="planner-drop-select">${dropOptionsHTML}</select>
-              </div>
-              <button class="btn btn-primary" id="planner-confirm-move" style="margin-top:10px;">Confirm Move</button>
-              <button class="btn btn-ghost" id="planner-cancel-move" style="margin-top:10px;">Cancel</button>
-            </div>
-          `;
-          document.getElementById('planner-confirm-move').addEventListener('click', async () => {
-            const dropPid = document.getElementById('planner-drop-select').value;
-            detail.plannerMoves.push({week, addPid, dropPid});
-            await savePlannerMoves(state.currentLeagueId, detail.plannerMoves);
-            toast('Move planned');
-            renderCurrentTab();
-          });
-          document.getElementById('planner-cancel-move').addEventListener('click', () => {
-            paintWaiverResults(document.getElementById('planner-waiver-search').value);
-          });
-        });
-      });
-    }
-
-    const searchInput = document.getElementById('planner-waiver-search');
-    if(searchInput) searchInput.addEventListener('input', (e) => paintWaiverResults(e.target.value));
-  }
-
-  function renderCurrentTab(){
-    render();
-  }
-
-  function buildWaiverCandidatesByPosition(detail){
-    const owned = computeOwnedPlayerIds(detail);
-    const trendingMap = {};
-    (state.trendingCache || []).forEach(t => trendingMap[t.player_id] = t.count);
-    const proj = state.projectionsCache;
-    const groups = {};
-    WAIVER_POSITIONS.forEach(p => groups[p] = []);
-
-    if(proj){
-      Object.keys(proj.byPlayer).forEach(pid => {
-        if(owned.has(pid)) return;
-        const info = playerLabel(pid);
-        if(!info || !groups[info.pos]) return;
-        const pts = projectedPoints(pid, detail.league);
-        if(pts == null) return;
-        groups[info.pos].push({...info, pid, proj: pts, adds: trendingMap[pid] || 0});
-      });
-    } else {
-      // Projections didn't load this session (undocumented endpoint) — fall back to trending adds only.
-      (state.trendingCache || []).forEach(t => {
-        if(owned.has(t.player_id)) return;
-        const info = playerLabel(t.player_id);
-        if(!info || !groups[info.pos]) return;
-        groups[info.pos].push({...info, pid: t.player_id, proj: null, adds: t.count});
-      });
-    }
-
-    Object.keys(groups).forEach(pos => {
-      groups[pos].sort((a,b) => {
-        if(a.proj != null && b.proj != null) return b.proj - a.proj;
-        if(a.proj != null) return -1;
-        if(b.proj != null) return 1;
-        return b.adds - a.adds;
-      });
-    });
-    return {groups, proj};
-  }
-
-  function renderWaiverWireTab(detail){
-    const {groups, proj} = buildWaiverCandidatesByPosition(detail);
-
-    const sectionsHTML = WAIVER_POSITIONS.filter(pos => groups[pos].length).map(pos => {
-      const top = groups[pos].slice(0, 8);
-      return `
-        <div style="margin-bottom:22px;">
-          <div class="roster-group-title">${pos}</div>
-          <div class="roster-list">
-            ${top.map(p => `
-              <div class="player-row">
-                <div class="slot-tag ${slotColorClass(pos)}">${pos}</div>
-                <div class="player-name ${nameColorClass(pos)}">${playerNameHTML(p)}</div>
-                <div class="player-meta">${p.team}${p.proj!=null ? ` · <span style="color:var(--gold);">Proj ${p.proj.toFixed(1)}</span>` : ''}${p.adds ? ` · +${p.adds} adds (48h)` : ''}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    const projNote = proj
-      ? `Ranked by Week ${proj.week} (${proj.season}) projections, scored to match this league's format — Sleeper-wide waiver-add counts from the last 48 hours are shown alongside for context.`
-      : `Projections didn't load this session, so this is ranked by Sleeper-wide waiver-add counts from the last 48 hours instead.`;
-
-    return `
-      <div class="empty-note" style="margin-bottom:16px;">
-        ${projNote} Points are calculated from the raw projected stat line using this league's exact scoring settings, the same way Sleeper's own app does it. Projections themselves come from an undocumented Sleeper endpoint though (not part of their official API), and update on their own schedule — so if a number still looks off versus the Sleeper app, it's most likely the underlying projection having refreshed since this session loaded, not the scoring math. Players already rostered in this league are excluded.
-      </div>
-      ${sectionsHTML || '<div style="color:var(--chalk-faint); font-size:13px; padding:8px 2px;">No waiver candidates found.</div>'}
-    `;
   }
 
   function renderRostersTab(detail){
@@ -2298,57 +1050,6 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     IND:13, NYJ:13, LV:13, BAL:13,
     DAL:14, ARI:14,
   };
-
-  // Full 2026 regular-season schedule (opponent per week), transcribed from a
-  // user-supplied schedule image. An automated self-consistency check (does
-  // each team's claimed opponent match up with that opponent's own row) found
-  // the home/away flag was unreliable in roughly 30% of games, so it is NOT
-  // used or displayed anywhere — only the opponent identity is shown, which
-  // checked out reliably. The one opponent-identity conflict found (Kansas
-  // City / New Orleans / NY Jets, Week 9) was resolved by cross-referencing
-  // Cleveland's independently-consistent row.
-  // Format: TEAM: [[opp, _unused], ... 18 entries] or null for a bye week.
-  const SCHEDULE_2026 = {
-    ARI: [['LAC',0],['SEA',1],['SF',0],['NYG',0],['DET',1],['LAR',0],['DEN',1],['DAL',0],['SEA',0],['LAR',1],['KC',0],['WAS',1],['PHI',1],null,['NYJ',1],['NO',0],['LV',1],['SF',1]],
-    ATL: [['PIT',0],['CAR',1],['GB',0],['NO',0],['BAL',1],['CHI',1],['SF',1],['TB',1],['CIN',1],['KC',1],null,['MIN',0],['DET',1],['CLE',0],['WAS',1],['TB',1],['NO',1],['CAR',0]],
-    BAL: [['IND',0],['NO',1],['DAL',0],['TEN',1],['ATL',0],['CLE',0],['CIN',1],['BUF',0],['JAX',1],['LAC',1],['CAR',0],['HOU',0],null,['TB',1],['PIT',0],['CLE',1],['CIN',0],['PIT',1]],
-    BUF: [['HOU',0],['DET',1],['LAC',1],['NE',1],['LAR',0],['LV',0],null,['BAL',1],['MIN',0],['NYJ',1],['MIA',1],['KC',0],['NE',0],['GB',0],['CHI',0],['DEN',0],['MIA',1],['NYJ',1]],
-    CAR: [['CHI',1],['ATL',0],['CLE',0],['DET',1],null,['PHI',0],['TB',1],['GB',1],['DEN',1],['NO',0],['BAL',1],['TB',0],['MIN',0],['NO',1],['CIN',1],['PIT',0],['SEA',1],['ATL',1]],
-    CHI: [['CAR',0],['MIN',1],['PHI',1],['NYJ',1],['GB',0],['ATL',0],['NE',1],['SEA',1],['TB',1],null,['NO',1],['DET',0],['JAX',1],['MIA',0],['BUF',0],['GB',1],['DET',1],['MIN',0]],
-    CIN: [['TB',1],['HOU',0],['PIT',0],['JAX',1],['MIA',0],null,['BAL',0],['TEN',1],['ATL',0],['PIT',1],['WAS',0],['NO',1],['CLE',0],['KC',0],['CAR',1],['IND',0],['BAL',1],['CLE',1]],
-    CLE: [['JAX',0],['TB',0],['CAR',1],['PIT',1],['NYJ',0],['BAL',1],['TEN',0],['PIT',0],['NO',0],['HOU',1],null,['LV',1],['CIN',1],['ATL',0],['NYG',1],['BAL',0],['IND',1],['CIN',0]],
-    DAL: [['NYG',0],['WAS',1],['BAL',1],['HOU',0],['TB',1],['GB',0],['PHI',0],['ARI',1],['IND',0],['SF',1],['TEN',1],['PHI',1],['SEA',0],null,['LAR',0],['JAX',1],['NYG',1],['WAS',0]],
-    DEN: [['KC',0],['JAX',1],['LAR',1],['SF',0],['LAC',0],['SEA',1],['ARI',0],['KC',1],['CAR',0],null,['LV',1],['PIT',0],['MIA',1],['NYJ',0],['LV',0],['BUF',0],['NE',0],['LAC',1]],
-    DET: [['NO',1],['BUF',0],['NYJ',1],['CAR',0],['ARI',0],null,['GB',1],['MIN',1],['MIA',1],['NE',1],['TB',1],['CHI',0],['ATL',0],['TEN',1],['MIN',1],['NYG',1],['CHI',0],['GB',1]],
-    GB: [['MIN',0],['NYJ',0],['ATL',1],['TB',0],['CHI',1],['DAL',1],['DET',0],['CAR',1],['NE',0],['MIN',1],null,['LAR',1],['NO',0],['BUF',1],['MIA',1],['CHI',0],['HOU',1],['DET',0]],
-    HOU: [['BUF',1],['CIN',1],['IND',0],['DAL',1],['TEN',0],['JAX',0],['NYG',1],null,['LAC',0],['CLE',0],['IND',1],['BAL',1],['PIT',0],['WAS',0],['JAX',1],['PHI',0],['GB',0],['TEN',1]],
-    IND: [['BAL',1],['KC',0],['HOU',1],['WAS',0],['PIT',0],['TEN',1],['MIN',0],['JAX',1],['DAL',1],['MIA',1],['HOU',0],['NYG',1],null,['PHI',1],['TEN',0],['CIN',1],['CLE',0],['JAX',1]],
-    JAX: [['CLE',1],['DEN',0],['NE',1],['CIN',0],['PHI',1],['HOU',1],null,['IND',1],['BAL',0],['TEN',0],['NYG',0],['TEN',1],['CHI',0],['PIT',1],['HOU',0],['DAL',0],['WAS',1],['IND',0]],
-    KC: [['DEN',1],['IND',1],['MIA',0],['LV',0],null,['LAC',1],['SEA',0],['DEN',0],['NYJ',1],['ATL',0],['ARI',1],['BUF',0],['LAR',1],['CIN',0],['NE',1],['SF',1],['LAC',0],['LV',1]],
-    LAC: [['ARI',1],['LV',1],['BUF',0],['SEA',0],['DEN',1],['KC',0],null,['LAR',1],['HOU',1],['BAL',0],['NYJ',1],['NE',1],['TB',0],['LV',0],['SF',1],['MIA',1],['KC',1],['DEN',0]],
-    LAR: [['SF',1],['NYG',1],['DEN',0],['PHI',0],['BUF',1],['ARI',1],['LV',0],['LAC',1],['WAS',0],['ARI',0],null,['GB',1],['KC',1],['SF',0],['DAL',1],['SEA',0],['TB',0],['SEA',1]],
-    LV: [['MIA',1],['LAC',0],['NO',0],['KC',1],['NE',0],['BUF',1],['LAR',1],['NYJ',1],['SF',0],['SEA',1],['DEN',0],['CLE',0],null,['LAC',1],['DEN',1],['TEN',1],['ARI',0],['KC',0]],
-    MIA: [['LV',0],['SF',0],['KC',1],['MIN',0],['CIN',1],null,['NYJ',0],['NE',1],['DET',1],['IND',1],['BUF',1],['NYJ',1],['DEN',1],['CHI',1],['GB',1],['LAC',1],['BUF',1],['NE',0]],
-    MIN: [['GB',1],['CHI',0],['TB',0],['MIA',1],['NO',0],null,['IND',1],['DET',0],['BUF',1],['GB',1],['SF',0],['ATL',1],['CAR',0],['NE',1],['DET',0],['WAS',1],['NYJ',0],['CHI',1]],
-    NE: [['SEA',0],['PIT',1],['JAX',1],['BUF',0],['LV',1],['NYJ',1],['CHI',0],['MIA',1],['GB',1],['DET',0],null,['LAC',0],['BUF',1],['MIN',1],['KC',0],['NYJ',0],['DEN',1],['MIA',1]],
-    NO: [['DET',0],['BAL',0],['LV',1],['ATL',1],['MIN',1],['NYG',0],['PIT',1],null,['CLE',1],['CAR',1],['CHI',0],['CIN',0],['GB',1],['CAR',0],['TB',0],['ARI',1],['ATL',0],['TB',1]],
-    NYG: [['DAL',1],['LAR',0],['TEN',1],['ARI',1],['WAS',0],['NO',1],['HOU',0],null,['PHI',0],['WAS',1],['JAX',1],['IND',0],['SF',1],['SEA',0],['CLE',1],['DET',1],['DAL',0],['PHI',1]],
-    NYJ: [['TEN',0],['GB',1],['DET',0],['CHI',0],['CLE',1],['NE',0],['MIA',1],['LV',1],['KC',0],['BUF',1],['LAC',0],['MIA',1],null,['DEN',1],['ARI',0],['NE',1],['MIN',1],['BUF',0]],
-    PHI: [['WAS',1],['TEN',1],['CHI',0],['LAR',1],['JAX',0],['CAR',1],['DAL',1],['WAS',0],['NYG',1],null,['PIT',1],['DAL',0],['ARI',0],['IND',1],['SEA',0],['HOU',0],['SF',0],['NYG',0]],
-    PIT: [['ATL',1],['NE',0],['CIN',1],['CLE',0],['IND',1],['TB',0],['NO',0],['CLE',1],null,['CIN',0],['PHI',0],['DEN',1],['HOU',1],['JAX',1],['BAL',1],['CAR',1],['TEN',0],['BAL',0]],
-    SEA: [['NE',1],['ARI',0],['WAS',0],['LAC',1],['SF',1],['DEN',0],['KC',1],['CHI',0],['ARI',1],['LV',0],null,['SF',0],['DAL',1],['NYG',1],['PHI',1],['LAR',1],['CAR',0],['LAR',0]],
-    SF: [['LAR',0],['MIA',1],['ARI',1],['DEN',1],['SEA',0],['WAS',1],['ATL',1],null,['LV',1],['DAL',0],['MIN',1],['SEA',1],['NYG',0],['LAR',1],['LAC',0],['KC',1],['PHI',1],['ARI',0]],
-    TB: [['CIN',0],['CLE',0],['MIN',1],['GB',1],['DAL',0],['PIT',1],['CAR',0],['ATL',1],['CHI',0],null,['DET',0],['CAR',1],['LAC',1],['BAL',0],['NO',1],['ATL',1],['LAR',1],['NO',0]],
-    TEN: [['NYJ',1],['PHI',1],['NYG',0],['BAL',0],['HOU',1],['IND',1],['CLE',1],['CIN',0],null,['JAX',1],['DAL',0],['JAX',0],['WAS',1],['DET',0],['IND',1],['LV',0],['PIT',1],['HOU',0]],
-    WAS: [['PHI',0],['DAL',0],['SEA',1],['IND',1],['NYG',1],['SF',0],null,['PHI',1],['LAR',1],['NYG',0],['CIN',1],['ARI',0],['TEN',0],['HOU',1],['ATL',1],['MIN',0],['JAX',0],['DAL',1]],
-  };
-  function getMatchup(teamAbbr, week){
-    const row = SCHEDULE_2026[teamAbbr];
-    if(!row) return null;
-    const entry = row[week-1];
-    if(entry === null || entry === undefined) return null; // bye
-    return {opp: entry[0]};
-  }
 
   function nameColorClass(pos){
     if(pos === 'QB') return 'name-red';
@@ -2418,27 +1119,6 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
     const assignment = greedyAssignLineup(pool, slotOrder);
     return {slotOrder, assignment, pool};
-  }
-
-  // Same optimizer, but for the Season Planner: takes a plain list of player
-  // ids (which may include hypothetical waiver adds not on the real Sleeper
-  // roster) and a specific week's projections, rather than a real roster object.
-  function computePlannerLineup(pids, league, week){
-    const pool = pids.map(pid => {
-      const info = playerLabel(pid);
-      const rawProj = plannerProjectedPoints(pid, league, week);
-      return {pid, pos: info ? info.pos : null, proj: rawProj == null ? -1 : rawProj, hasProj: rawProj != null, info};
-    });
-    const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
-    const assignment = greedyAssignLineup(pool, slotOrder);
-    return {slotOrder, assignment, pool};
-  }
-
-  function median(arr){
-    if(!arr.length) return null;
-    const sorted = [...arr].sort((a,b) => a-b);
-    const mid = Math.floor(sorted.length/2);
-    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
   }
 
   function lineupTotal(assignment, pool){
@@ -2715,7 +1395,7 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     async function saveAll(){
       const data = gatherFullPayoutData();
       try{
-        await savePayout(state.currentLeagueId, data);
+        await Storage.savePayout(state.currentLeagueId, data);
         detail.payout = data;
         toast('Saved');
       }catch(e){
@@ -2730,11 +1410,69 @@ document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
     }
   }
 
+  // ---------------- Shared exposure for other scripts (e.g. guillotine.js) ----------------
+  // app.js itself still runs as one closure internally (state/functions below
+  // stay exactly as before) — this block just hangs read/write access to the
+  // pieces guillotine.js needs off window.EZL so it isn't stuck guessing at
+  // private references. Since `state` is a shared object reference (not a
+  // copy), mutations made from guillotine.js are visible here immediately.
+  window.EZL = {
+    state,
+    app,
+    render,
+    toast,
+    fetchJSON,
+    avatarHTML,
+    teamDisplayName,
+    initials,
+    ensurePlayersLoaded,
+    ensureTrendingLoaded,
+    ensureProjectionsLoaded,
+    loadLeagueDetail,
+    renderLoading,
+    projectedPoints,
+    scoreStatLine,
+    playerLabel,
+    playerNameHTML,
+    nameColorClass,
+    slotColorClass,
+    slotLabel,
+    SLOT_ELIGIBILITY,
+    greedyAssignLineup,
+    computeStandings,
+    computeOptimalLineup,
+    lineupTotal,
+    faabRemaining,
+    isGuillotineLeague,
+    isDynastyLeague,
+    isDraftComplete,
+    categoryForLeagueName,
+    groupByCategory,
+    currencySymbol,
+    renderTopbar,
+    bindTopbar,
+    GUILLOTINE_ICON,
+    computeOwnedPlayerIds,
+    getProjectionWeek,
+    PROJECTION_SEASON,
+    BYE_WEEKS,
+  };
+
   // ---------------- Boot ----------------
   async function boot(){
-    console.log(typeof importUserData);
     renderLoading('Starting up...');
-    const settings = await loadSettings();
+    // If the user has never picked a projection week before (no saved
+    // preference in localStorage), default it to Sleeper's actual current
+    // week instead of always starting at Week 1.
+    let hasSavedWeek = false;
+    try{ hasSavedWeek = localStorage.getItem(APP_PREFIX + 'projectionWeek') != null; }catch(e){}
+    if(!hasSavedWeek){
+      try{
+        const nflState = await ensureNflState();
+        setProjectionWeek(nflState.week);
+      }catch(e){ /* Sleeper's /state/nfl endpoint failed — stay on the Week 1 default */ }
+    }
+    const settings = await Storage.loadSettings();
     if(settings && settings.username && settings.season){
       state.username = settings.username;
       state.season = settings.season;
