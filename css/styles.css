@@ -40,7 +40,7 @@
   background:linear-gradient(180deg, var(--banner) 0%, var(--banner-dark) 100%);
   padding:18px 24px;
   display:flex;
-  align-items:center;
+  align-items:flex-start;
   justify-content:space-between;
   border-bottom:2px solid var(--gold-dim);
   flex-wrap:wrap;
@@ -62,7 +62,8 @@
   letter-spacing:0.14em;
   color:rgba(245,243,238,0.55);
 }
-.topbar-actions{display:flex; gap:8px; align-items:center;}
+.topbar-actions{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+.topbar-utils{margin-left:auto; display:flex; gap:4px; align-items:center;}
 .week-picker{
   display:flex; align-items:center; gap:6px;
   background:rgba(0,0,0,0.2);
@@ -562,19 +563,5 @@
   opacity: 0.8;
   line-height: 1;
 }
-.topbar{
-  display:flex;
-  align-items:flex-start;
-}
-
-.topbar-actions{
-  display:flex;
-  gap:8px;
-}
-
-.topbar-utils{
-  margin-left:auto;
-  display:flex;
-  gap:4px;
-  align-items:center;
-}
+/* .topbar / .topbar-actions / .topbar-utils rules live in one place now —
+   see the top of this file, right after .brand-sub. */
