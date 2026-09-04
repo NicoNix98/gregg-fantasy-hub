@@ -32,13 +32,9 @@ window.Matchups = (function(){
     return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
   }
 
-  function findMatchupPair(detail){
-    const matchups = detail.matchupsWeek1 || [];
-    const mine = matchups.find(m => m.roster_id === detail.myRosterId);
-    if(!mine) return null;
-    const opp = matchups.find(m => m.matchup_id === mine.matchup_id && m.roster_id !== mine.roster_id);
-    return {mine, opp};
-  }
+  // findMatchupPair moved to app.js (EZL.findMatchupPair) once live.js
+  // needed the exact same this-week's-opponent lookup — see app.js's
+  // SHARED CHECKS section rather than a second copy here.
 
   // ---------------- Cross-league Matchups overview ----------------
   async function renderOverview(){
@@ -85,7 +81,7 @@ window.Matchups = (function(){
             detail.matchupsWeek1 = [];
           }
         }
-        const pair = findMatchupPair(detail);
+        const pair = EZL.findMatchupPair(detail);
         if(!pair || !pair.opp){
           return {bucket:'normal', row:{lg, notScheduled: true}};
         }
@@ -311,7 +307,7 @@ window.Matchups = (function(){
     if(!detail.myRosterId){
       return `<div class="empty-note">Couldn't find your team in this league.</div>`;
     }
-    const pair = findMatchupPair(detail);
+    const pair = EZL.findMatchupPair(detail);
     if(!pair || !pair.opp){
       detail.matchupState = null;
       return `<div class="empty-note">Week ${EZL.getProjectionWeek()} matchups haven't been generated for this league yet — Sleeper publishes the schedule closer to the season starting. Check back later.</div>`;

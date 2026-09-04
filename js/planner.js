@@ -99,62 +99,17 @@ window.Planner = (function(){
   }
 
   // ---------------- 2026 schedule ----------------
-  // Full 2026 regular-season schedule (opponent per week), transcribed from a
-  // user-supplied schedule image. An automated self-consistency check (does
-  // each team's claimed opponent match up with that opponent's own row) found
-  // the home/away flag was unreliable in roughly 30% of games, so it is NOT
-  // used or displayed anywhere — only the opponent identity is shown, which
-  // checked out reliably. The one opponent-identity conflict found (Kansas
-  // City / New Orleans / NY Jets, Week 9) was resolved by cross-referencing
-  // Cleveland's independently-consistent row.
-  // Format: TEAM: [[opp, _unused], ... 18 entries] or null for a bye week.
-  const SCHEDULE_2026 = {
-    ARI: [['LAC',0],['SEA',1],['SF',0],['NYG',0],['DET',1],['LAR',0],['DEN',1],['DAL',0],['SEA',0],['LAR',1],['KC',0],['WAS',1],['PHI',1],null,['NYJ',1],['NO',0],['LV',1],['SF',1]],
-    ATL: [['PIT',0],['CAR',1],['GB',0],['NO',0],['BAL',1],['CHI',1],['SF',1],['TB',1],['CIN',1],['KC',1],null,['MIN',0],['DET',1],['CLE',0],['WAS',1],['TB',1],['NO',1],['CAR',0]],
-    BAL: [['IND',0],['NO',1],['DAL',0],['TEN',1],['ATL',0],['CLE',0],['CIN',1],['BUF',0],['JAX',1],['LAC',1],['CAR',0],['HOU',0],null,['TB',1],['PIT',0],['CLE',1],['CIN',0],['PIT',1]],
-    BUF: [['HOU',0],['DET',1],['LAC',1],['NE',1],['LAR',0],['LV',0],null,['BAL',1],['MIN',0],['NYJ',1],['MIA',1],['KC',0],['NE',0],['GB',0],['CHI',0],['DEN',0],['MIA',1],['NYJ',1]],
-    CAR: [['CHI',1],['ATL',0],['CLE',0],['DET',1],null,['PHI',0],['TB',1],['GB',1],['DEN',1],['NO',0],['BAL',1],['TB',0],['MIN',0],['NO',1],['CIN',1],['PIT',0],['SEA',1],['ATL',1]],
-    CHI: [['CAR',0],['MIN',1],['PHI',1],['NYJ',1],['GB',0],['ATL',0],['NE',1],['SEA',1],['TB',1],null,['NO',1],['DET',0],['JAX',1],['MIA',0],['BUF',0],['GB',1],['DET',1],['MIN',0]],
-    CIN: [['TB',1],['HOU',0],['PIT',0],['JAX',1],['MIA',0],null,['BAL',0],['TEN',1],['ATL',0],['PIT',1],['WAS',0],['NO',1],['CLE',0],['KC',0],['CAR',1],['IND',0],['BAL',1],['CLE',1]],
-    CLE: [['JAX',0],['TB',0],['CAR',1],['PIT',1],['NYJ',0],['BAL',1],['TEN',0],['PIT',0],['NO',0],['HOU',1],null,['LV',1],['CIN',1],['ATL',0],['NYG',1],['BAL',0],['IND',1],['CIN',0]],
-    DAL: [['NYG',0],['WAS',1],['BAL',1],['HOU',0],['TB',1],['GB',0],['PHI',0],['ARI',1],['IND',0],['SF',1],['TEN',1],['PHI',1],['SEA',0],null,['LAR',0],['JAX',1],['NYG',1],['WAS',0]],
-    DEN: [['KC',0],['JAX',1],['LAR',1],['SF',0],['LAC',0],['SEA',1],['ARI',0],['KC',1],['CAR',0],null,['LV',1],['PIT',0],['MIA',1],['NYJ',0],['LV',0],['BUF',0],['NE',0],['LAC',1]],
-    DET: [['NO',1],['BUF',0],['NYJ',1],['CAR',0],['ARI',0],null,['GB',1],['MIN',1],['MIA',1],['NE',1],['TB',1],['CHI',0],['ATL',0],['TEN',1],['MIN',1],['NYG',1],['CHI',0],['GB',1]],
-    GB: [['MIN',0],['NYJ',0],['ATL',1],['TB',0],['CHI',1],['DAL',1],['DET',0],['CAR',1],['NE',0],['MIN',1],null,['LAR',1],['NO',0],['BUF',1],['MIA',1],['CHI',0],['HOU',1],['DET',0]],
-    HOU: [['BUF',1],['CIN',1],['IND',0],['DAL',1],['TEN',0],['JAX',0],['NYG',1],null,['LAC',0],['CLE',0],['IND',1],['BAL',1],['PIT',0],['WAS',0],['JAX',1],['PHI',0],['GB',0],['TEN',1]],
-    IND: [['BAL',1],['KC',0],['HOU',1],['WAS',0],['PIT',0],['TEN',1],['MIN',0],['JAX',1],['DAL',1],['MIA',1],['HOU',0],['NYG',1],null,['PHI',1],['TEN',0],['CIN',1],['CLE',0],['JAX',1]],
-    JAX: [['CLE',1],['DEN',0],['NE',1],['CIN',0],['PHI',1],['HOU',1],null,['IND',1],['BAL',0],['TEN',0],['NYG',0],['TEN',1],['CHI',0],['PIT',1],['HOU',0],['DAL',0],['WAS',1],['IND',0]],
-    KC: [['DEN',1],['IND',1],['MIA',0],['LV',0],null,['LAC',1],['SEA',0],['DEN',0],['NYJ',1],['ATL',0],['ARI',1],['BUF',0],['LAR',1],['CIN',0],['NE',1],['SF',1],['LAC',0],['LV',1]],
-    LAC: [['ARI',1],['LV',1],['BUF',0],['SEA',0],['DEN',1],['KC',0],null,['LAR',1],['HOU',1],['BAL',0],['NYJ',1],['NE',1],['TB',0],['LV',0],['SF',1],['MIA',1],['KC',1],['DEN',0]],
-    LAR: [['SF',1],['NYG',1],['DEN',0],['PHI',0],['BUF',1],['ARI',1],['LV',0],['LAC',1],['WAS',0],['ARI',0],null,['GB',1],['KC',1],['SF',0],['DAL',1],['SEA',0],['TB',0],['SEA',1]],
-    LV: [['MIA',1],['LAC',0],['NO',0],['KC',1],['NE',0],['BUF',1],['LAR',1],['NYJ',1],['SF',0],['SEA',1],['DEN',0],['CLE',0],null,['LAC',1],['DEN',1],['TEN',1],['ARI',0],['KC',0]],
-    MIA: [['LV',0],['SF',0],['KC',1],['MIN',0],['CIN',1],null,['NYJ',0],['NE',1],['DET',1],['IND',1],['BUF',1],['NYJ',1],['DEN',1],['CHI',1],['GB',1],['LAC',1],['BUF',1],['NE',0]],
-    MIN: [['GB',1],['CHI',0],['TB',0],['MIA',1],['NO',0],null,['IND',1],['DET',0],['BUF',1],['GB',1],['SF',0],['ATL',1],['CAR',0],['NE',1],['DET',0],['WAS',1],['NYJ',0],['CHI',1]],
-    NE: [['SEA',0],['PIT',1],['JAX',1],['BUF',0],['LV',1],['NYJ',1],['CHI',0],['MIA',1],['GB',1],['DET',0],null,['LAC',0],['BUF',1],['MIN',1],['KC',0],['NYJ',0],['DEN',1],['MIA',1]],
-    NO: [['DET',0],['BAL',0],['LV',1],['ATL',1],['MIN',1],['NYG',0],['PIT',1],null,['CLE',1],['CAR',1],['CHI',0],['CIN',0],['GB',1],['CAR',0],['TB',0],['ARI',1],['ATL',0],['TB',1]],
-    NYG: [['DAL',1],['LAR',0],['TEN',1],['ARI',1],['WAS',0],['NO',1],['HOU',0],null,['PHI',0],['WAS',1],['JAX',1],['IND',0],['SF',1],['SEA',0],['CLE',1],['DET',1],['DAL',0],['PHI',1]],
-    NYJ: [['TEN',0],['GB',1],['DET',0],['CHI',0],['CLE',1],['NE',0],['MIA',1],['LV',1],['KC',0],['BUF',1],['LAC',0],['MIA',1],null,['DEN',1],['ARI',0],['NE',1],['MIN',1],['BUF',0]],
-    PHI: [['WAS',1],['TEN',1],['CHI',0],['LAR',1],['JAX',0],['CAR',1],['DAL',1],['WAS',0],['NYG',1],null,['PIT',1],['DAL',0],['ARI',0],['IND',1],['SEA',0],['HOU',0],['SF',0],['NYG',0]],
-    PIT: [['ATL',1],['NE',0],['CIN',1],['CLE',0],['IND',1],['TB',0],['NO',0],['CLE',1],null,['CIN',0],['PHI',0],['DEN',1],['HOU',1],['JAX',1],['BAL',1],['CAR',1],['TEN',0],['BAL',0]],
-    SEA: [['NE',1],['ARI',0],['WAS',0],['LAC',1],['SF',1],['DEN',0],['KC',1],['CHI',0],['ARI',1],['LV',0],null,['SF',0],['DAL',1],['NYG',1],['PHI',1],['LAR',1],['CAR',0],['LAR',0]],
-    SF: [['LAR',0],['MIA',1],['ARI',1],['DEN',1],['SEA',0],['WAS',1],['ATL',1],null,['LV',1],['DAL',0],['MIN',1],['SEA',1],['NYG',0],['LAR',1],['LAC',0],['KC',1],['PHI',1],['ARI',0]],
-    TB: [['CIN',0],['CLE',0],['MIN',1],['GB',1],['DAL',0],['PIT',1],['CAR',0],['ATL',1],['CHI',0],null,['DET',0],['CAR',1],['LAC',1],['BAL',0],['NO',1],['ATL',1],['LAR',1],['NO',0]],
-    TEN: [['NYJ',1],['PHI',1],['NYG',0],['BAL',0],['HOU',1],['IND',1],['CLE',1],['CIN',0],null,['JAX',1],['DAL',0],['JAX',0],['WAS',1],['DET',0],['IND',1],['LV',0],['PIT',1],['HOU',0]],
-    WAS: [['PHI',0],['DAL',0],['SEA',1],['IND',1],['NYG',1],['SF',0],null,['PHI',1],['LAR',1],['NYG',0],['CIN',1],['ARI',0],['TEN',0],['HOU',1],['ATL',1],['MIN',0],['JAX',0],['DAL',1]],
-  };
-  function getMatchup(teamAbbr, week){
-    const row = SCHEDULE_2026[teamAbbr];
-    if(!row) return null;
-    const entry = row[week-1];
-    if(entry === null || entry === undefined) return null; // bye
-    return {opp: entry[0]};
-  }
+  // The full 2026 schedule (opponent per week) and the getMatchup() lookup
+  // used below now live in app.js, shared via EZL.SCHEDULE_2026 /
+  // EZL.getMatchup() — live.js needs the exact same data to group starters
+  // by NFL game, so it moved out of this file rather than being duplicated
+  // a second time. See app.js's SCHEDULE 2026 section for the data itself.
 
   function plannerMatchupText(pid, week){
     const info = EZL.playerLabel(pid);
     if(!info || !info.team || info.team === 'FA') return '';
     if(EZL.BYE_WEEKS[info.team] === week) return '<span style="color:var(--chalk-faint);">BYE</span>';
-    const m = getMatchup(info.team, week);
+    const m = EZL.getMatchup(info.team, week);
     if(!m) return '<span style="color:var(--chalk-faint);">—</span>';
     const rank = getMatchupDifficulty(info.pos, m.opp);
     const color = rankColor(rank);
@@ -431,7 +386,7 @@ window.Planner = (function(){
         const team = p.info.team;
         if(!team || team === 'FA') return '<td>—</td>';
         if(EZL.BYE_WEEKS[team] === week) return '<td style="color:var(--chalk-faint); font-size:11px;">BYE</td>';
-        const m = getMatchup(team, week);
+        const m = EZL.getMatchup(team, week);
         if(!m) return '<td>—</td>';
         const rank = getMatchupDifficulty(p.info.pos, m.opp);
         const color = rankColor(rank);
