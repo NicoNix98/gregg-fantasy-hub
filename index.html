@@ -2,9 +2,23 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <title>Gregg Norman's Fantasy Hub — Sleeper Fantasy Tracker</title>
 <link rel="stylesheet" href="css/styles.css">
+
+<!-- PWA: lets this be installed to a phone home screen as a standalone app -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#123249">
+
+<!-- iOS home-screen support (Android/Chrome reads the manifest above instead) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Fantasy Hub">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+<!-- Home screen / tab icons -->
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 </head>
 <body style="margin:0; background:#12181B;">
 <div id="app"></div>
