@@ -530,6 +530,11 @@
 
   async function renderLeagueList(){
     renderLoading('Fetching your leagues...');
+    // Guillotine cards show a projected rank + FAAB instead of a W/L record
+    // (guillotine leagues have no such thing as a record), which needs this
+    // week's projections and the player dictionary loaded up front — same
+    // pattern as the cross-league Matchups overview.
+    await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
     // Fetch every league's quick roster/standing snapshot concurrently
     // rather than one at a time — with N leagues this was N sequential
     // round trips (league + rosters + users each), now it's the time of
@@ -540,7 +545,9 @@
         state.leagueDetail[lg.league_id] = detail;
         const standings = computeStandings(detail.rosters, detail.usersById);
         const myIdx = standings.findIndex(r => r.roster_id === detail.myRosterId);
-        return {lg, detail, standings, myIdx};
+        const guillotineFmt = isGuillotineLeague(lg.name);
+        const guillotineStats = guillotineFmt ? computeGuillotineCardStats(detail) : null;
+        return {lg, detail, standings, myIdx, guillotineFmt, guillotineStats};
       }catch(e){
         return {lg, error: e.message};
       }
@@ -583,19 +590,84 @@
     });
   }
 
-  function renderLeagueCard({lg, detail, standings, myIdx, error}){
+  // Guillotine leagues have no W/L record, so their league-list card shows
+  // this instead: rank among still-alive teams by this week's projected
+  // optimal lineup (same math as the Command Centre / cross-league
+  // Matchups overview's guillotine branch), your FAAB remaining, and the
+  // still-alive field's average FAAB remaining for context. Requires
+  // ensurePlayersLoaded()/ensureProjectionsLoaded() to have already
+  // resolved — renderLeagueList() awaits both before this is ever called.
+  function computeGuillotineCardStats(detail){
+    if(!isDraftComplete(detail)) return {notDrafted:true};
+    const cutSet = new Set(detail.cutRosters || []);
+    if(cutSet.has(detail.myRosterId)) return {cut:true};
+    const alive = detail.rosters.filter(r => !cutSet.has(r.roster_id));
+    const totals = alive.map(r => {
+      const opt = computeOptimalLineup(r, detail.league);
+      const faab = faabRemaining({raw:r}, detail);
+      return {roster_id: r.roster_id, projTotal: lineupTotal(opt.assignment, opt.pool), faab: faab.remaining};
+    }).sort((a,b) => b.projTotal - a.projTotal);
+    const myEntry = totals.find(t => t.roster_id === detail.myRosterId);
+    if(!myEntry) return {error:true};
+    const rank = totals.findIndex(t => t.roster_id === detail.myRosterId) + 1;
+    const avgFaab = totals.reduce((s,t) => s + t.faab, 0) / totals.length;
+    return {rank, aliveCount: totals.length, myProjTotal: myEntry.projTotal, myFaab: myEntry.faab, avgFaab};
+  }
+
+  function renderGuillotineLeagueCard(lg, total, stats){
+    stats = stats || {};
+    let bodyHTML;
+    if(stats.notDrafted){
+      bodyHTML = `<div class="league-card-meta" style="margin-top:2px;">Draft not complete yet — no projection to show</div>`;
+    } else if(stats.cut){
+      bodyHTML = `<div class="league-card-meta" style="margin-top:2px; color:var(--chalk-dim);">You've been cut — eliminated</div>`;
+    } else if(stats.error || stats.rank == null){
+      bodyHTML = `<div class="league-card-meta" style="color:#E08A63;">Couldn't find your team in this league</div>`;
+    } else {
+      const isLast = stats.rank === stats.aliveCount;
+      const inBottomQuarter = stats.rank > stats.aliveCount * 0.75;
+      const rankColor = isLast ? '#E85C4A' : (inBottomQuarter ? '#E0A458' : '#7FBF8E');
+      bodyHTML = `
+        <div class="league-card-row">
+          <div>
+            <div class="league-card-label">Proj. Rank (Wk ${getProjectionWeek()})</div>
+            <div class="scoreboard-num" style="color:${rankColor};">${stats.rank}<span style="font-size:14px; color:var(--chalk-faint);">/${stats.aliveCount}</span></div>
+          </div>
+          <div style="text-align:right;">
+            <div class="league-card-label">Your FAAB</div>
+            <div class="scoreboard-num">$${stats.myFaab}</div>
+          </div>
+        </div>
+        <div class="league-card-row" style="margin-top:8px;">
+          <div class="league-card-label">League Avg FAAB (alive)</div>
+          <div class="mono u-small" style="color:var(--chalk-dim);">$${stats.avgFaab.toFixed(0)}</div>
+        </div>
+      `;
+    }
+    return `
+      <div class="league-card" id="card-${lg.league_id}">
+        <div class="league-card-name">${lg.name}</div>
+        <div class="league-card-meta">${total} teams · ${lg.status}</div>
+        ${bodyHTML}
+      </div>
+    `;
+  }
+
+  function renderLeagueCard({lg, detail, standings, myIdx, error, guillotineFmt, guillotineStats}){
     if(error){
       return `<div class="league-card" style="border-left-color:var(--alert);">
         <div class="league-card-name">${lg.name}</div>
         <div class="league-card-meta" style="color:#E08A63;">Couldn't load — ${error}</div>
       </div>`;
     }
+    const total = standings.length;
+    if(guillotineFmt){
+      return renderGuillotineLeagueCard(lg, total, guillotineStats);
+    }
     const me = myIdx >= 0 ? standings[myIdx] : null;
     const record = me ? `${me.wins}-${me.losses}${me.ties?('-'+me.ties):''}` : '—';
     const rank = myIdx >= 0 ? (myIdx+1) : '—';
-    const total = standings.length;
     const winClass = me && me.wins >= me.losses ? 'win' : 'loss';
-    const guillotine = isGuillotineLeague(lg.name);
     return `
       <div class="league-card" id="card-${lg.league_id}">
         <div class="league-card-name">${lg.name}</div>
@@ -605,11 +677,10 @@
             <div class="league-card-label">Your Record</div>
             <div class="scoreboard-num ${winClass}">${record}</div>
           </div>
-          ${guillotine ? '' : `
           <div style="text-align:right;">
             <div class="league-card-label">Rank</div>
             <div class="scoreboard-num">${rank}<span style="font-size:14px; color:var(--chalk-faint);">/${total}</span></div>
-          </div>`}
+          </div>
         </div>
       </div>
     `;
