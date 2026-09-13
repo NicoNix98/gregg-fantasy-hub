@@ -157,8 +157,12 @@ window.Live = (function(){
     function fileStarter(pid, side){
       if(!pid) return;
       const g = getPlayerGameInfo(pid, week);
-      const proj = EZL.projectedPoints(pid, detail.league);
-      const row = {pid, info: g.info, proj};
+      const schedInfo = g.gameKey ? (gameSchedule && gameSchedule.byPairKey[g.gameKey]) : null;
+      const finished = isGameFinished(schedInfo);
+      const actual = finished ? EZL.actualPoints(pid, detail.league) : null;
+      const isActual = actual != null;
+      const proj = isActual ? actual : EZL.projectedPoints(pid, detail.league);
+      const row = {pid, info: g.info, proj, isActual};
       if(g.status === 'scheduled'){
         if(!games[g.gameKey]) games[g.gameKey] = {label: g.gameLabel, mine: [], opp: []};
         games[g.gameKey][side].push(row);
@@ -175,24 +179,33 @@ window.Live = (function(){
   }
 
   // ---------------- Shared rendering pieces ----------------
+  function pointsMetaHTML(proj, isActual){
+    if(proj == null) return '—';
+    return isActual
+      ? `<span style="color:#7FBF8E; font-weight:600;">${proj.toFixed(1)}</span> pts`
+      : `${proj.toFixed(1)} pts`;
+  }
+
   function playerRowsHTML(rows){
     if(!rows.length) return '<div class="empty-note">None.</div>';
     return rows.map(p => `
       <div class="player-row">
         <div class="slot-tag ${EZL.slotColorClass(p.info?p.info.pos:'')}">${p.info?p.info.pos:'?'}</div>
         <div class="player-name ${p.info?EZL.nameColorClass(p.info.pos):''}" style="flex:1;">${p.info?EZL.playerNameHTML(p.info):p.pid}</div>
-        <div class="player-meta mono">${p.proj!=null?p.proj.toFixed(1)+' pts':'—'}</div>
+        <div class="player-meta mono">${pointsMetaHTML(p.proj, p.isActual)}</div>
       </div>
     `).join('');
   }
 
   // Renders one "vs"-style block (or single-sided for guillotine) for a
   // {label, mine, opp} game bucket. Shared by both the By League single-
-  // league view and the By Game cross-league breakdown.
-  function gameBlockHTML(title, mine, opp, isGuillotine, oppLabel){
+  // league view and the By Game cross-league breakdown. `finished` just
+  // dims the block visually — the FINAL/LIVE badge itself is baked into
+  // the `title` HTML the caller passes in.
+  function gameBlockHTML(title, mine, opp, isGuillotine, oppLabel, finished){
     return `
-      <div class="section-title" style="margin-top:18px;">${title}</div>
-      <div class="matchup-grid" style="align-items:start;">
+      <div class="section-title" style="margin-top:18px; ${finished?'opacity:0.6;':''}">${title}</div>
+      <div class="matchup-grid" style="align-items:start; ${finished?'opacity:0.6;':''}">
         <div class="matchup-panel">
           <div class="roster-group-title">Your Starters</div>
           <div class="roster-list">${playerRowsHTML(mine)}</div>
@@ -222,6 +235,46 @@ window.Live = (function(){
       if(!ta && tb) return 1;
       return fallbackCompare(a, b);
     };
+  }
+
+  // ---------------- Game timing status (upcoming / live / finished) ----------------
+  // NFL games run close to 3.5 hours in practice — there's no live score
+  // feed wired into this app to know exactly when a game has actually
+  // ended, so this is a clock-based estimate: 3.5 hours after kickoff, a
+  // game is treated as over. Only matters for games where the ESPN
+  // schedule lookup resolved a kickoff time; unknown-kickoff games are
+  // always treated as "upcoming" so they're never wrongly buried/flagged.
+  const GAME_FINISHED_AFTER_MS = 3.5 * 60 * 60 * 1000;
+  function getGameTimeStatus(schedInfo){
+    if(!schedInfo || !schedInfo.kickoff) return 'upcoming';
+    const elapsedMs = Date.now() - schedInfo.kickoff.getTime();
+    if(elapsedMs < 0) return 'upcoming';
+    if(elapsedMs >= GAME_FINISHED_AFTER_MS) return 'finished';
+    return 'live';
+  }
+  function isGameFinished(schedInfo){
+    return getGameTimeStatus(schedInfo) === 'finished';
+  }
+  // Same ordering as chronologicalGameKeyComparator, but finished games are
+  // pushed to the bottom of the list first — they're the ones you no
+  // longer need to be scanning past to find what's still live/upcoming.
+  function sortGameKeysFinishedLast(keys, fallbackCompare){
+    const timeCompare = chronologicalGameKeyComparator(fallbackCompare);
+    return keys.slice().sort((a, b) => {
+      const fa = isGameFinished(gameSchedule && gameSchedule.byPairKey[a]);
+      const fb = isGameFinished(gameSchedule && gameSchedule.byPairKey[b]);
+      if(fa !== fb) return fa ? 1 : -1;
+      return timeCompare(a, b);
+    });
+  }
+  // FINAL reuses the same red pill already used for eliminated guillotine
+  // teams; LIVE is a small green pill matching the "ahead" color used
+  // elsewhere (matchup edge, etc.) — no new colors introduced.
+  function gameStatusBadgeHTML(schedInfo){
+    const status = getGameTimeStatus(schedInfo);
+    if(status === 'finished') return ` <span class="cut-badge">FINAL</span>`;
+    if(status === 'live') return ` <span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">● LIVE</span>`;
+    return '';
   }
 
   // ---------------- By League mode: kickoff-window filter ----------------
@@ -255,9 +308,9 @@ window.Live = (function(){
   function renderLeagueBreakdownHTML(bd){
     if(bd.error) return `<div class="empty-note">${bd.error}</div>`;
     const oppLabel = bd.oppUser ? EZL.teamDisplayName(bd.oppUser, bd.oppRoster) : 'Opponent';
-    let gameKeys = Object.keys(bd.games).sort(chronologicalGameKeyComparator((a,b) =>
+    let gameKeys = sortGameKeysFinishedLast(Object.keys(bd.games), (a,b) =>
       (bd.games[b].mine.length + bd.games[b].opp.length) - (bd.games[a].mine.length + bd.games[a].opp.length)
-    ));
+    );
 
     const scheduleAvailable = isScheduleAvailable();
     let filterUnavailableNote = '';
@@ -273,16 +326,36 @@ window.Live = (function(){
     const notScheduledNote = bd.notScheduled
       ? `<div class="empty-note" style="margin-bottom:14px;">Week ${EZL.getProjectionWeek()} matchups haven't been generated for this league yet, so this is showing your starters only — no opponent to compare against.</div>`
       : '';
-    const gamesHTML = gameKeys.map(key => gameBlockHTML(gameHeaderHTML(key, gameSchedule && gameSchedule.byPairKey[key]), bd.games[key].mine, bd.games[key].opp, bd.isGuillotine, oppLabel)).join('');
+
+    function renderBlock(key){
+      const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
+      const titleHTML = `${gameHeaderHTML(key, schedInfo)}${gameStatusBadgeHTML(schedInfo)}`;
+      return gameBlockHTML(titleHTML, bd.games[key].mine, bd.games[key].opp, bd.isGuillotine, oppLabel, isGameFinished(schedInfo));
+    }
+    const activeKeys = gameKeys.filter(key => !isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
+    const finishedKeys = gameKeys.filter(key => isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
+    const activeGamesHTML = activeKeys.map(renderBlock).join('');
+    // Finished games are collapsed behind one tap instead of taking up full
+    // blocks — a native <details> disclosure, so no extra JS/state needed.
+    const finishedSummaryHTML = finishedKeys.length ? `
+      <details style="margin-top:18px;">
+        <summary class="section-title" style="cursor:pointer;">${finishedKeys.length} game${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></summary>
+        ${finishedKeys.map(renderBlock).join('')}
+      </details>
+    ` : '';
+
     // Bye/no-game starters don't belong to any kickoff window, so they only
     // show up under "All Games" — under a specific time filter they'd just
     // be noise unrelated to what was asked for.
     const hasNoGame = !timeFilterApplied && (bd.noGame.mine.length || bd.noGame.opp.length);
-    const noGameHTML = hasNoGame ? gameBlockHTML('Bye / No Game Today', bd.noGame.mine, bd.noGame.opp, bd.isGuillotine, oppLabel) : '';
+    const noGameHTML = hasNoGame ? gameBlockHTML('Bye / No Game Today', bd.noGame.mine, bd.noGame.opp, bd.isGuillotine, oppLabel, false) : '';
     const emptyNote = timeFilterApplied
       ? `No starters have a ${leagueTimeFilter} kickoff this week.`
       : 'No starters with a scheduled game found.';
-    return `${filterUnavailableNote}${notScheduledNote}${gamesHTML || `<div class="empty-note">${emptyNote}</div>`}${noGameHTML}`;
+    const bodyHTML = activeGamesHTML
+      ? activeGamesHTML
+      : (finishedKeys.length ? '<div class="empty-note">Everything here has finished — tap below to review it.</div>' : `<div class="empty-note">${emptyNote}</div>`);
+    return `${filterUnavailableNote}${notScheduledNote}${bodyHTML}${finishedSummaryHTML}${noGameHTML}`;
   }
 
   // ---------------- By League mode ----------------
@@ -322,15 +395,20 @@ window.Live = (function(){
     const map = {};
     entries.forEach(e => {
       if(!e.pid) return;
-      if(!map[e.pid]) map[e.pid] = {pid: e.pid, info: e.info, leagueNames: [], projs: []};
+      if(!map[e.pid]) map[e.pid] = {pid: e.pid, info: e.info, leagueNames: [], projs: [], isActual: false};
       map[e.pid].leagueNames.push(e.lgName);
       if(e.proj != null) map[e.pid].projs.push(e.proj);
+      // Every entry for this pid in this game is the same underlying NFL
+      // game, so isActual is uniform across leagues — true wins if any
+      // entry says so.
+      if(e.isActual) map[e.pid].isActual = true;
     });
     return Object.values(map).map(p => ({
       pid: p.pid,
       info: p.info,
       leagueCount: p.leagueNames.length,
       leagueNames: p.leagueNames,
+      isActual: p.isActual,
       // Scoring settings differ league to league, so this is an average
       // across the leagues this player is your (or your opponent's)
       // starter in for this game — a representative number, not exact.
@@ -338,78 +416,61 @@ window.Live = (function(){
     })).sort((a,b) => (b.proj==null?-1:b.proj) - (a.proj==null?-1:a.proj) || b.leagueCount - a.leagueCount);
   }
 
-  function splitByTeam(list, teamA, teamB){
-    const a = [], b = [];
-    list.forEach(p => {
-      const team = p.info && p.info.team;
-      if(team === teamB) b.push(p); else a.push(p); // anything unrecognized defaults to the "away"/first column
-    });
-    return {a, b};
-  }
-
+  // Tapping a player with more than one league reveals which leagues via a
+  // native <details> disclosure — no click handler or re-render needed,
+  // and it keeps the collapsed row compact for mobile. Players in exactly
+  // one league render as a plain row since there's nothing to expand.
   function aggregatedPlayerRowHTML(p){
+    const rowInner = `
+      <div class="slot-tag ${p.info?EZL.slotColorClass(p.info.pos):''}">${p.info?p.info.pos:'?'}</div>
+      <div class="player-name ${p.info?EZL.nameColorClass(p.info.pos):''}" style="flex:1; min-width:0;">${p.info?EZL.playerNameHTML(p.info):p.pid}</div>
+      <div class="player-meta mono" style="text-align:right; margin-right:10px; white-space:nowrap;">${pointsMetaHTML(p.proj, p.isActual)}</div>
+      <div class="mono" style="min-width:24px; text-align:center; background:rgba(212,160,23,0.15); color:var(--gold); border-radius:20px; font-size:11px; font-weight:700; padding:3px 8px;" title="${p.leagueCount} league${p.leagueCount===1?'':'s'}">${p.leagueCount}</div>
+    `;
+    if(p.leagueCount <= 1){
+      return `<div class="player-row">${rowInner}</div>`;
+    }
     return `
-      <div class="player-row">
-        <div class="slot-tag ${p.info?EZL.slotColorClass(p.info.pos):''}">${p.info?p.info.pos:'?'}</div>
-        <div style="flex:1; min-width:0;">
-          <div class="player-name ${p.info?EZL.nameColorClass(p.info.pos):''}">${p.info?EZL.playerNameHTML(p.info):p.pid}</div>
-          ${p.leagueCount>1 ? `<div style="font-size:11px; color:var(--chalk-faint); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${p.leagueNames.join(', ')}</div>` : ''}
-        </div>
-        <div class="player-meta mono" style="text-align:right; margin-right:10px; white-space:nowrap;">${p.proj!=null?p.proj.toFixed(1)+' pts':'—'}</div>
-        <div class="mono" style="min-width:24px; text-align:center; background:rgba(212,160,23,0.15); color:var(--gold); border-radius:20px; font-size:11px; font-weight:700; padding:3px 8px;" title="${p.leagueCount} league${p.leagueCount===1?'':'s'}">${p.leagueCount}</div>
-      </div>
+      <details class="player-row" style="padding:0;">
+        <summary style="display:flex; align-items:center; gap:12px; padding:10px 14px; cursor:pointer;">${rowInner}</summary>
+        <div style="padding:0 14px 10px 44px; font-size:11px; color:var(--chalk-faint);">${p.leagueNames.join(', ')}</div>
+      </details>
     `;
   }
 
-  function aggregatedTeamPanelHTML(teamAbbr, players){
-    return `
-      <div class="matchup-panel">
-        <div class="matchup-panel-header">
-          ${teamLogoImg(teamAbbr, 26)}
-          <div class="matchup-team-name">${teamAbbr || 'Unknown'}</div>
-        </div>
-        <div class="roster-list">${players.length ? players.map(aggregatedPlayerRowHTML).join('') : '<div class="empty-note">None.</div>'}</div>
-      </div>
-    `;
-  }
-
-  // The number on the right of each row is how many of your leagues have
-  // that player starting in this game — not fantasy points from more than
-  // one source, just exposure count, same idea as the Player Shares screen.
-  function renderGameDetailHTML(chosen, gameKey){
-    const schedInfo = gameSchedule && gameSchedule.byPairKey[gameKey];
-    const [teamA, teamB] = schedInfo ? [schedInfo.awayAbbr, schedInfo.homeAbbr] : gameKey.split('-');
-
+  // The number beside each row is how many of your leagues have that
+  // player starting in this game — tap a player to see which leagues (kept
+  // collapsed by default to save space on a phone screen). No team split
+  // here on purpose — just everyone playing for you on one side and
+  // everyone you're up against on the other, which is what actually
+  // matters when deciding what to watch.
+  function renderGameDetailHTML(chosen){
     const mineEntries = [];
     const oppEntries = [];
     chosen.leagues.forEach(entry => {
-      entry.mine.forEach(row => mineEntries.push({pid: row.pid, info: row.info, proj: row.proj, lgName: entry.lg.name}));
+      entry.mine.forEach(row => mineEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: entry.lg.name}));
       if(!entry.isGuillotine){
-        entry.opp.forEach(row => oppEntries.push({pid: row.pid, info: row.info, proj: row.proj, lgName: entry.lg.name}));
+        entry.opp.forEach(row => oppEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: entry.lg.name}));
       }
     });
 
-    const mineSplit = splitByTeam(aggregatePlayerEntries(mineEntries), teamA, teamB);
+    const mineAgg = aggregatePlayerEntries(mineEntries);
     const oppAgg = aggregatePlayerEntries(oppEntries);
-    const oppSplit = splitByTeam(oppAgg, teamA, teamB);
 
     return `
-      <div class="section-title" style="margin-top:4px;">Your Starters</div>
-      <div class="matchup-grid" style="align-items:start; margin-bottom:8px;">
-        ${aggregatedTeamPanelHTML(teamA, mineSplit.a)}
-        <div class="matchup-vs">@</div>
-        ${aggregatedTeamPanelHTML(teamB, mineSplit.b)}
-      </div>
-      ${oppAgg.length ? `
-        <div style="border-top:2px dashed var(--line-strong); margin:22px 0;"></div>
-        <div class="section-title">Starters You're Up Against</div>
-        <div class="matchup-grid" style="align-items:start;">
-          ${aggregatedTeamPanelHTML(teamA, oppSplit.a)}
-          <div class="matchup-vs">@</div>
-          ${aggregatedTeamPanelHTML(teamB, oppSplit.b)}
+      <div class="matchup-grid" style="align-items:start;">
+        <div class="matchup-panel">
+          <div class="roster-group-title">Playing For You</div>
+          <div class="roster-list">${mineAgg.length ? mineAgg.map(aggregatedPlayerRowHTML).join('') : '<div class="empty-note">None.</div>'}</div>
         </div>
-      ` : ''}
-      <div class="empty-note" style="margin-top:18px;">The number beside each player is how many of your leagues have them starting in this game. Guillotine leagues only ever appear in "Your Starters" — there's no opponent to show.</div>
+        ${oppAgg.length ? `
+        <div class="matchup-vs">VS</div>
+        <div class="matchup-panel">
+          <div class="roster-group-title">Up Against You</div>
+          <div class="roster-list">${oppAgg.map(aggregatedPlayerRowHTML).join('')}</div>
+        </div>` : ''}
+      </div>
+      <div class="empty-note" style="margin-top:14px;">Tap a player showing more than one league to see which ones. A green score means that player's game is over and it's their real final total, not a projection. Guillotine leagues only ever appear under "Playing For You" — there's no opponent to show.</div>
     `;
   }
 
@@ -491,38 +552,85 @@ window.Live = (function(){
     }
 
     const index = buildGamesIndex();
-    const gameKeys = Object.keys(index).sort(chronologicalGameKeyComparator((a,b) =>
+    const gameKeys = sortGameKeysFinishedLast(Object.keys(index), (a,b) =>
       index[b].leagues.length - index[a].leagues.length || index[a].label.localeCompare(index[b].label)
-    ));
+    );
     if(!selectedGameKey || !index[selectedGameKey]){
       selectedGameKey = gameKeys.length ? gameKeys[0] : null;
     }
-    const header = `<div class="section-title">This Week's Games <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(only games with a starter in a selected league, earliest kickoff first)</span></div>`;
+    const header = `<div class="section-title">This Week's Games <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(earliest kickoff first, finished games collapsed below)</span></div>`;
     if(!gameKeys.length) return filterHTML + header + '<div class="empty-note">No games with starters found among the selected leagues this week.</div>';
+
+    const activeKeys = gameKeys.filter(key => !isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
+    const finishedKeys = gameKeys.filter(key => isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
+
+    // A quick horizontally-scrollable strip of every still-relevant game
+    // (live or upcoming — finished ones are already collapsed below), so
+    // you can jump straight to what you care about without scrolling past
+    // the full list first. Reuses the same data-live-game click handler as
+    // the full rows below — it's just another way to set selectedGameKey.
+    const stripHTML = activeKeys.length ? `
+      <div style="display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; margin-bottom:14px;">
+        ${activeKeys.map(key => {
+          const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
+          const [a, b] = schedInfo && schedInfo.awayAbbr ? [schedInfo.awayAbbr, schedInfo.homeAbbr] : key.split('-');
+          const timeLabel = schedInfo && schedInfo.kickoff ? formatKickoff(schedInfo.kickoff) : '';
+          const status = getGameTimeStatus(schedInfo);
+          const isSelected = key === selectedGameKey;
+          return `
+            <button class="btn ${isSelected?'btn-primary':'btn-ghost'}" data-live-game="${key}" style="display:flex; align-items:center; gap:6px; flex-shrink:0; font-size:12px; white-space:nowrap; padding:6px 12px;">
+              ${teamLogoImg(a, 18)}${teamLogoImg(b, 18)}
+              <span class="mono">${a}/${b}</span>
+              ${status==='live' ? '<span style="color:#7FBF8E;">●</span>' : (timeLabel ? `<span style="color:var(--chalk-faint); font-size:10px;">${timeLabel}</span>` : '')}
+            </button>
+          `;
+        }).join('')}
+      </div>
+    ` : '';
 
     // Each game's detail (when selected) is rendered as its own item right
     // after that game's row, inside the same list — not appended once at
     // the bottom of the page — so it opens up in place.
-    const itemsHTML = gameKeys.map(key => {
+    function renderRow(key){
       const isSelected = key === selectedGameKey;
+      const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
+      const finished = isGameFinished(schedInfo);
+      const rowStyle = isSelected ? 'border-left-color:var(--gold);' : (finished ? 'border-left-color:var(--alert); opacity:0.65;' : '');
       const rowHTML = `
-        <div class="overview-row" data-live-game="${key}" ${isSelected?'style="border-left-color:var(--gold);"':''}>
+        <div class="overview-row" data-live-game="${key}" ${rowStyle?`style="${rowStyle}"`:''}>
           <div class="overview-main">
-            <div class="overview-league-name">${gameHeaderHTML(key, gameSchedule && gameSchedule.byPairKey[key])}</div>
+            <div class="overview-league-name">${gameHeaderHTML(key, schedInfo)}${gameStatusBadgeHTML(schedInfo)}</div>
             <div class="overview-payouts">${index[key].leagues.length} league${index[key].leagues.length===1?'':'s'} with a starter in this game</div>
           </div>
         </div>
       `;
       const detailHTML = isSelected
-        ? `<div style="padding:14px 16px 4px; margin-top:-4px; border:1px solid var(--line); border-top:none; border-radius:0 0 9px 9px; background:var(--surface);">${renderGameDetailHTML(index[key], key)}</div>`
+        ? `<div style="padding:14px 16px 4px; margin-top:-4px; border:1px solid var(--line); border-top:none; border-radius:0 0 9px 9px; background:var(--surface);">${renderGameDetailHTML(index[key])}</div>`
         : '';
       return rowHTML + detailHTML;
-    }).join('');
+    }
+
+    const activeItemsHTML = activeKeys.map(renderRow).join('');
+    // Finished games are collapsed behind one tap instead of each taking up
+    // a full row — a native <details> disclosure, so no extra JS/state is
+    // needed to track whether it's open.
+    const finishedSummaryHTML = finishedKeys.length ? `
+      <details style="margin-top:4px;">
+        <summary class="overview-row" style="cursor:pointer; border-left-color:var(--alert); opacity:0.75;">
+          <div class="overview-main">
+            <div class="overview-league-name">${finishedKeys.length} game${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></div>
+            <div class="overview-payouts">Tap to show</div>
+          </div>
+        </summary>
+        <div class="overview-list" style="margin-top:10px;">${finishedKeys.map(renderRow).join('')}</div>
+      </details>
+    ` : '';
 
     return `
       ${filterHTML}
+      ${stripHTML}
       ${header}
-      <div class="overview-list" style="margin-bottom:22px;">${itemsHTML}</div>
+      <div class="overview-list" style="margin-bottom:22px;">${activeItemsHTML || '<div class="empty-note">Everything with a starter has finished — check below.</div>'}${finishedSummaryHTML}</div>
     `;
   }
 
@@ -566,6 +674,13 @@ window.Live = (function(){
       document.querySelectorAll('[data-live-game]').forEach(row => row.addEventListener('click', () => {
         selectedGameKey = row.dataset.liveGame;
         paint();
+        // Repaint just replaced the DOM synchronously, so the new row
+        // already exists by the next frame — scroll to it in case it was
+        // picked from the quick-jump strip further up the page.
+        requestAnimationFrame(() => {
+          const target = document.querySelector(`.overview-row[data-live-game="${selectedGameKey}"]`);
+          if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
+        });
       }));
       document.querySelectorAll('[data-game-filter-all]').forEach(btn => btn.addEventListener('click', () => {
         gameFilterLeagueIds = new Set(state.leagues.map(lg => lg.league_id));
@@ -584,11 +699,34 @@ window.Live = (function(){
     }
   }
 
+  // ---------------- Auto-refresh while this screen is open ----------------
+  // No new network calls needed just to keep LIVE/FINAL badges accurate —
+  // those are computed from the clock against an already-cached kickoff
+  // time. The one thing that does need refetching to actually update is
+  // real (actual) scores as a game progresses, so that's the only network
+  // call this makes. Self-cancels the moment you're not on the Live Hub
+  // anymore (checked both before and after the fetch, so a repaint never
+  // clobbers whatever screen you've navigated to in the meantime).
+  let autoRefreshTimer = null;
+  const AUTO_REFRESH_MS = 60 * 1000;
+  function stopAutoRefresh(){
+    if(autoRefreshTimer){ clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  }
+  function startAutoRefresh(){
+    stopAutoRefresh();
+    autoRefreshTimer = setInterval(async () => {
+      if(state.view !== 'liveHub'){ stopAutoRefresh(); return; }
+      await EZL.ensureActualStatsLoaded(true).catch(()=>null);
+      if(state.view !== 'liveHub') return;
+      paint();
+    }, AUTO_REFRESH_MS);
+  }
+
   // ---------------- Entry point called from app.js's router ----------------
   async function render(){
     EZL.renderLoading('Building your Live Hub...');
     const week = EZL.getProjectionWeek();
-    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null), ensureGameSchedule(week)]);
+    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null), ensureGameSchedule(week), EZL.ensureActualStatsLoaded().catch(()=>null)]);
     // Load every league's detail + this week's matchups concurrently (same
     // pattern as Matchups.renderOverview) so both modes below can read
     // straight from state.leagueDetail without further round trips.
@@ -609,6 +747,7 @@ window.Live = (function(){
       }catch(e){ /* league skipped if it fails to load, same as other cross-league screens */ }
     }));
     paint();
+    startAutoRefresh();
   }
 
   return { render };
