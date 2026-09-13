@@ -39,7 +39,7 @@ window.Matchups = (function(){
   // ---------------- Cross-league Matchups overview ----------------
   async function renderOverview(){
     EZL.renderLoading('Pulling Week ' + EZL.getProjectionWeek() + ' matchups...');
-    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null)]);
+    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null), EZL.ensureGameSchedule(EZL.getProjectionWeek()).catch(()=>null), EZL.ensureActualStatsLoaded().catch(()=>null)]);
     // Fetch/process every league concurrently instead of one at a time —
     // each iteration was a handful of sequential network round trips, so
     // with many leagues this was the biggest single wait in the app.
@@ -371,7 +371,7 @@ window.Matchups = (function(){
 
   // Entry point app.js calls from the per-league "matchup" tab dispatch.
   async function renderTab(detail, contentEl){
-    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null)]);
+    await Promise.all([EZL.ensurePlayersLoaded(), EZL.ensureProjectionsLoaded().catch(()=>null), EZL.ensureGameSchedule(EZL.getProjectionWeek()).catch(()=>null), EZL.ensureActualStatsLoaded().catch(()=>null)]);
     if(!detail.matchupsWeek1){
       try{
         detail.matchupsWeek1 = await EZL.fetchJSON(`https://api.sleeper.app/v1/league/${state.currentLeagueId}/matchups/${EZL.getProjectionWeek()}`);

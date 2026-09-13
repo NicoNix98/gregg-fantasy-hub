@@ -76,6 +76,7 @@
     trendingCache: null,
     nflState: null,
     projectionsCache: null,
+    actualStatsCache: null,
     projectionWeek: null,
     plannerProjCache: null,
     plannerWeek: null,
@@ -254,6 +255,121 @@
     const proj = state.projectionsCache;
     if(!proj) return null;
     return scoreStatLine(proj.byPlayer[pid], league);
+  }
+
+  // ---------------- Actual (real, post-game) stats ----------------
+  // Sleeper's classic stats endpoint — one bulk call per week covering
+  // every player, rather than the newer per-position projections endpoint
+  // above. Like projections, this is NOT part of Sleeper's documented
+  // public API and its exact response shape is inferred from community
+  // references rather than a live-tested call, so this is defensive about
+  // shape (handles either an array of {player_id, stats} records or a
+  // plain {player_id: statsObject} map) and — same as projections — a
+  // failure here just means currentPoints() below keeps showing
+  // projections instead of actuals, never a broken screen.
+  async function ensureActualStatsLoaded(force){
+    const week = getProjectionWeek();
+    if(!force && state.actualStatsCache && state.actualStatsCache.week === week && state.actualStatsCache.season === PROJECTION_SEASON){
+      return state.actualStatsCache;
+    }
+    const byPlayer = {};
+    try{
+      const data = await fetchJSON(`https://api.sleeper.app/stats/nfl/regular/${PROJECTION_SEASON}/${week}`);
+      if(Array.isArray(data)){
+        data.forEach(p => { if(p && p.player_id) byPlayer[p.player_id] = p.stats || p; });
+      } else if(data && typeof data === 'object'){
+        Object.keys(data).forEach(pid => { byPlayer[pid] = data[pid]; });
+      }
+    }catch(e){
+      // Fall through with an empty cache — actualPoints()/currentPoints()
+      // below already handle a missing entry per player.
+    }
+    state.actualStatsCache = {season: PROJECTION_SEASON, week, byPlayer};
+    return state.actualStatsCache;
+  }
+
+  // Same idea as projectedPoints(), but scores this week's real final stat
+  // line instead of the projected one.
+  function actualPoints(pid, league){
+    const actual = state.actualStatsCache;
+    if(!actual || actual.week !== getProjectionWeek() || actual.season !== PROJECTION_SEASON) return null;
+    return scoreStatLine(actual.byPlayer[pid], league);
+  }
+
+  // ---------------- Game timing (has this player's game finished?) ----------------
+  // Mirrors Live Hub's own kickoff-time lookup (ESPN's public scoreboard —
+  // same undocumented-endpoint caveat as elsewhere) so screens outside the
+  // Live Hub can also tell whether a player's real game is over. Kept as
+  // its own small cache here rather than sharing Live Hub's copy, since
+  // this file doesn't otherwise depend on live.js loading first.
+  const GAME_FINISHED_AFTER_MS = 3.5 * 60 * 60 * 1000;
+  let gameSchedule = null; // {week, byPairKey: {'AWAY-HOME sorted key': {kickoff}}}
+  const ESPN_ABBR_MAP = { WSH: 'WAS' }; // the only abbreviation ESPN and Sleeper disagree on
+  function normalizeEspnAbbr(a){ return ESPN_ABBR_MAP[a] || a; }
+  async function ensureGameSchedule(week){
+    if(gameSchedule && gameSchedule.week === week) return gameSchedule;
+    const byPairKey = {};
+    try{
+      const data = await fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=${week}&seasontype=2&year=${PROJECTION_SEASON}`);
+      (data.events || []).forEach(ev => {
+        const comp = ev.competitions && ev.competitions[0];
+        const competitors = comp && comp.competitors;
+        if(!competitors) return;
+        const away = competitors.find(c => c.homeAway === 'away');
+        const home = competitors.find(c => c.homeAway === 'home');
+        if(!away || !home || !away.team || !home.team) return;
+        const awayAbbr = normalizeEspnAbbr(away.team.abbreviation);
+        const homeAbbr = normalizeEspnAbbr(home.team.abbreviation);
+        byPairKey[[awayAbbr, homeAbbr].sort().join('-')] = { kickoff: comp.date ? new Date(comp.date) : null };
+      });
+    }catch(e){
+      // Fall through with an empty schedule — getTeamGameStatus() below
+      // just returns 'unknown' per team, same as a missing pairing.
+    }
+    gameSchedule = {week, byPairKey};
+    return gameSchedule;
+  }
+  // 'bye' | 'upcoming' | 'live' | 'finished' | 'unknown' (unknown = no
+  // opponent found, or the schedule lookup never resolved a kickoff time).
+  function getTeamGameStatus(teamAbbr, week){
+    if(!teamAbbr) return 'unknown';
+    if(BYE_WEEKS[teamAbbr] === week) return 'bye';
+    const m = getMatchup(teamAbbr, week);
+    if(!m) return 'unknown';
+    const pairKey = [teamAbbr, m.opp].sort().join('-');
+    const schedInfo = (gameSchedule && gameSchedule.week === week) ? gameSchedule.byPairKey[pairKey] : null;
+    if(!schedInfo || !schedInfo.kickoff) return 'unknown';
+    const elapsedMs = Date.now() - schedInfo.kickoff.getTime();
+    if(elapsedMs < 0) return 'upcoming';
+    if(elapsedMs >= GAME_FINISHED_AFTER_MS) return 'finished';
+    return 'live';
+  }
+
+  // The one function screens should actually call for "what score should I
+  // show for this player right now": real final points once their game has
+  // finished, projected otherwise — falls back to projectedPoints() if a
+  // game's marked finished but no actual stat line came through (e.g. a
+  // DNP, or the actual-stats fetch failed this session).
+  function currentPoints(pid, league){
+    const info = playerLabel(pid);
+    const status = info ? getTeamGameStatus(info.team, getProjectionWeek()) : 'unknown';
+    if(status === 'finished'){
+      const actual = actualPoints(pid, league);
+      if(actual != null) return actual;
+    }
+    return projectedPoints(pid, league);
+  }
+  // Same as currentPoints(), but also says whether that number is real
+  // (isActual: true) or still projected — for screens that label it
+  // differently (e.g. Rosters tab's "Proj"/"Final" tag).
+  function currentPointsInfo(pid, league){
+    const info = playerLabel(pid);
+    const status = info ? getTeamGameStatus(info.team, getProjectionWeek()) : 'unknown';
+    if(status === 'finished'){
+      const actual = actualPoints(pid, league);
+      if(actual != null) return {value: actual, isActual: true};
+    }
+    return {value: projectedPoints(pid, league), isActual: false};
   }
 
   async function loadLeaguesForUser(username, season){
@@ -533,8 +649,11 @@
     // Guillotine cards show a projected rank + FAAB instead of a W/L record
     // (guillotine leagues have no such thing as a record), which needs this
     // week's projections and the player dictionary loaded up front — same
-    // pattern as the cross-league Matchups overview.
-    await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+    // pattern as the cross-league Matchups overview. Also loads the game
+    // schedule + actual stats so computeOptimalLineup can swap a finished
+    // player's projection for their real final score.
+    const week = getProjectionWeek();
+    await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null), ensureGameSchedule(week).catch(()=>null), ensureActualStatsLoaded().catch(()=>null)]);
     // Fetch every league's quick roster/standing snapshot concurrently
     // rather than one at a time — with N leagues this was N sequential
     // round trips (league + rosters + users each), now it's the time of
@@ -905,7 +1024,7 @@
       }
     } else if(state.currentTab === 'rosters'){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading player data and projections...</div>`;
-      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null), ensureGameSchedule(getProjectionWeek()).catch(()=>null), ensureActualStatsLoaded().catch(()=>null)]);
       content.innerHTML = renderRostersTab(detail);
       bindRosterPicker(detail);
     } else if(state.currentTab === 'matchup' && !guillotineFmt){
@@ -913,7 +1032,7 @@
       await window.Matchups.renderTab(detail, content);
     } else if(state.currentTab === 'command' && guillotineFmt){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading Command Centre...</div>`;
-      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null)]);
+      await Promise.all([ensurePlayersLoaded(), ensureProjectionsLoaded().catch(()=>null), ensureGameSchedule(getProjectionWeek()).catch(()=>null), ensureActualStatsLoaded().catch(()=>null)]);
       window.Guillotine.renderCommandCentre(detail, content);
     } else if(state.currentTab === 'waiver'){
       content.innerHTML = `<div class="loading-row"><div class="spinner"></div> Loading player pool, trending adds, and projections...</div>`;
@@ -1257,7 +1376,7 @@
     const excluded = new Set([...(roster.reserve||[]), ...(roster.taxi||[])]);
     const pool = (roster.players || []).filter(pid => !excluded.has(pid)).map(pid => {
       const info = playerLabel(pid);
-      const rawProj = projectedPoints(pid, league);
+      const rawProj = currentPoints(pid, league);
       return {pid, pos: info ? info.pos : null, proj: rawProj == null ? -1 : rawProj, hasProj: rawProj != null, info};
     });
     const slotOrder = (league.roster_positions || []).filter(p => p !== 'BN' && p !== 'IR' && p !== 'TAXI');
@@ -1274,8 +1393,11 @@
   }
 
   function projMetaHTML(pid, league){
-    const p = projectedPoints(pid, league);
-    return p != null ? ` · <span style="color:var(--gold);">Proj ${p.toFixed(1)}</span>` : '';
+    const info = currentPointsInfo(pid, league);
+    if(info.value == null) return '';
+    return info.isActual
+      ? ` · <span style="color:#7FBF8E;">Final ${info.value.toFixed(1)}</span>`
+      : ` · <span style="color:var(--gold);">Proj ${info.value.toFixed(1)}</span>`;
   }
 
   // Shared row template for starters/bench/IR — avoids three near-identical
@@ -1572,9 +1694,15 @@
     ensurePlayersLoaded,
     ensureTrendingLoaded,
     ensureProjectionsLoaded,
+    ensureActualStatsLoaded,
+    ensureGameSchedule,
+    getTeamGameStatus,
     loadLeagueDetail,
     renderLoading,
     projectedPoints,
+    actualPoints,
+    currentPoints,
+    currentPointsInfo,
     scoreStatLine,
     playerLabel,
     playerNameHTML,
