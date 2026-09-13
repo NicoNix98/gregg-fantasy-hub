@@ -274,7 +274,7 @@
     }
     const byPlayer = {};
     try{
-      const data = await fetchJSON(`https://api.sleeper.app/stats/nfl/regular/${PROJECTION_SEASON}/${week}`);
+      const data = await fetchJSON(`https://api.sleeper.app/v1/stats/nfl/regular/${PROJECTION_SEASON}/${week}`);
       if(Array.isArray(data)){
         data.forEach(p => { if(p && p.player_id) byPlayer[p.player_id] = p.stats || p; });
       } else if(data && typeof data === 'object'){
