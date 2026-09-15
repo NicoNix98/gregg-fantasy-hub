@@ -1726,6 +1726,7 @@
     bindTopbar,
     GUILLOTINE_ICON,
     computeOwnedPlayerIds,
+    renderRosterGroups,
     getProjectionWeek,
     PROJECTION_SEASON,
     BYE_WEEKS,
