@@ -262,6 +262,22 @@ window.Waivers = (function(){
   }
 
   // ---------------- Waiver Hub detail (single league, full board) ----------------
+  // Starters (with their actual slot labels — QB/RB/FLEX/etc, not just
+  // position) and bench for the league currently open in the waiver board,
+  // so you can see what you actually need to fill before bidding. Reuses
+  // the exact same renderer the Rosters tab uses, rather than rebuilding
+  // slot-tag logic here.
+  function renderMyRosterHTML(detail){
+    const myRoster = detail.rosters.find(r => r.roster_id === detail.myRosterId);
+    if(!myRoster){
+      return '<div class="empty-note">Couldn\'t find your team in this league.</div>';
+    }
+    return `
+      <div class="empty-note" style="margin-bottom:14px;">Your current starting lineup and bench for this league — a quick reference for what positions actually need filling before you bid.</div>
+      ${EZL.renderRosterGroups(myRoster, detail.league)}
+    `;
+  }
+
   function renderHubDetail(){
     const lg = state.leagues.find(l => l.league_id === state.waiverHubLeagueId);
     const detail = state.leagueDetail[state.waiverHubLeagueId];
@@ -281,12 +297,13 @@ window.Waivers = (function(){
           <input id="waiver-detail-search" type="text" placeholder="e.g. player name"/>
         </div>
 
-        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
+        <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
          <button class="btn btn-ghost btn-mini" data-waiver-filter="ALL">ALL</button>
          <button class="btn btn-ghost btn-mini" data-waiver-filter="QB">QB</button>
          <button class="btn btn-ghost btn-mini" data-waiver-filter="RB">RB</button>
          <button class="btn btn-ghost btn-mini" data-waiver-filter="WR">WR</button>
          <button class="btn btn-ghost btn-mini" data-waiver-filter="TE">TE</button>
+         <button class="btn btn-ghost btn-mini" id="btn-toggle-my-roster" style="margin-left:auto;">👤 My Roster</button>
         </div>
 
         <div id="waiver-detail-results" style="max-height:640px; overflow-y:auto; padding-right:4px;"></div>
@@ -298,9 +315,27 @@ window.Waivers = (function(){
       EZL.render();
     });
     let waiverPositionFilter = 'ALL';
+    let showingMyRoster = false;
+
+    function syncFilterButtonStyles(){
+      document.querySelectorAll('[data-waiver-filter]').forEach(b => {
+        const active = !showingMyRoster && b.dataset.waiverFilter === waiverPositionFilter;
+        b.classList.toggle('btn-primary', active);
+        b.classList.toggle('btn-ghost', !active);
+      });
+      const rosterBtn = document.getElementById('btn-toggle-my-roster');
+      rosterBtn.classList.toggle('btn-primary', showingMyRoster);
+      rosterBtn.classList.toggle('btn-ghost', !showingMyRoster);
+    }
+
     function paint(query){
-      const q = query.trim().toLowerCase();
       const resultsEl = document.getElementById('waiver-detail-results');
+      if(showingMyRoster){
+        resultsEl.innerHTML = renderMyRosterHTML(detail);
+        syncFilterButtonStyles();
+        return;
+      }
+      const q = query.trim().toLowerCase();
       const html = WAIVER_POSITIONS
         .filter(pos => groups[pos].length)
        .filter(pos => waiverPositionFilter === 'ALL' || pos === waiverPositionFilter)
@@ -324,6 +359,7 @@ window.Waivers = (function(){
         `;
       }).join('');
       resultsEl.innerHTML = html || '<div style="color:var(--chalk-faint); font-size:13px;">No matching players.</div>';
+      syncFilterButtonStyles();
       // Rebinds the stage-bid buttons in the freshly-painted results (this
       // also re-attaches the league-card and bid-removal handlers from the
       // hub screen underneath, which is harmless — same behavior as the
@@ -334,17 +370,20 @@ window.Waivers = (function(){
     paint('');
 
     document.getElementById('waiver-detail-search')
-      .addEventListener('input', (e) => paint(e.target.value));
+      .addEventListener('input', (e) => {
+        showingMyRoster = false; // typing a search implies you want the waiver list back
+        paint(e.target.value);
+      });
+
+    document.getElementById('btn-toggle-my-roster').addEventListener('click', () => {
+      showingMyRoster = !showingMyRoster;
+      paint(document.getElementById('waiver-detail-search').value);
+    });
 
     document.querySelectorAll('[data-waiver-filter]').forEach(btn => {
       btn.addEventListener('click', () => {
+        showingMyRoster = false; // picking a position filter implies you want the waiver list back
         waiverPositionFilter = btn.dataset.waiverFilter;
-        document.querySelectorAll('[data-waiver-filter]').forEach(b => {
-          b.classList.remove('btn-primary');
-          b.classList.add('btn-ghost');
-        });
-        btn.classList.remove('btn-ghost');
-        btn.classList.add('btn-primary');
         paint(document.getElementById('waiver-detail-search').value);
       });
     });
