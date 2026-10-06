@@ -48,6 +48,7 @@ window.Live = (function(){
   let leagueCategoryTab = null;
   let selectedLeagueId = null;
   let selectedTimeSlotKey = null;
+  let finishedSlotsExpanded = false;
   // Which leagues feed into the By Time view. null until first render of
   // By Time mode, at which point it's lazily filled with every league
   // (i.e. unfiltered) — see ensureGameFilterInitialized().
@@ -484,10 +485,11 @@ window.Live = (function(){
     })).sort((a,b) => (b.proj==null?-1:b.proj) - (a.proj==null?-1:a.proj) || b.leagueCount - a.leagueCount);
   }
 
-  // Tapping a player with more than one league reveals which leagues via a
-  // native <details> disclosure — no click handler or re-render needed,
-  // and it keeps the collapsed row compact for mobile. Players in exactly
-  // one league render as a plain row since there's nothing to expand.
+  // Tapping any player reveals which league(s) they're in via a native
+  // <details> disclosure — no click handler or re-render needed, and it
+  // keeps the collapsed row compact for mobile. This always expands, even
+  // for a player in exactly one league — By Time merges leagues together,
+  // so which one it is isn't otherwise visible anywhere on the row.
   function aggregatedPlayerRowHTML(p){
     const rowInner = `
       <div class="slot-tag ${p.info?EZL.slotColorClass(p.info.pos):''}">${p.info?p.info.pos:'?'}</div>
@@ -495,9 +497,6 @@ window.Live = (function(){
       <div class="player-meta mono" style="text-align:right; margin-right:10px; white-space:nowrap;">${pointsMetaHTML(p.proj, p.isActual)}</div>
       <div class="mono" style="min-width:24px; text-align:center; background:rgba(212,160,23,0.15); color:var(--gold); border-radius:20px; font-size:11px; font-weight:700; padding:3px 8px;" title="${p.leagueCount} league${p.leagueCount===1?'':'s'}">${p.leagueCount}</div>
     `;
-    if(p.leagueCount <= 1){
-      return `<div class="player-row">${rowInner}</div>`;
-    }
     return `
       <details class="player-row" style="padding:0;">
         <summary style="display:flex; align-items:center; gap:12px; padding:10px 14px; cursor:pointer;">${rowInner}</summary>
@@ -634,8 +633,11 @@ window.Live = (function(){
     const activeKeys = nonEmptyKeys.filter(key => slotStatus[key] !== 'finished');
     const finishedKeys = nonEmptyKeys.filter(key => slotStatus[key] === 'finished');
 
-    if(!selectedTimeSlotKey || !nonEmptyKeys.includes(selectedTimeSlotKey)){
-      selectedTimeSlotKey = activeKeys[0] || finishedKeys[finishedKeys.length - 1] || null;
+    // Nothing auto-opens — default is every slot collapsed. Only clear the
+    // selection if it's pointing at a slot that's no longer here at all
+    // (e.g. a league filter change removed its only game).
+    if(selectedTimeSlotKey && !nonEmptyKeys.includes(selectedTimeSlotKey)){
+      selectedTimeSlotKey = null;
     }
 
     // Each slot's detail (when selected) is rendered as its own item right
@@ -665,18 +667,18 @@ window.Live = (function(){
 
     const activeItemsHTML = activeKeys.map(renderSlotRow).join('');
     // Finished slots are collapsed behind one tap instead of each taking up
-    // a full row — a native <details> disclosure, so no extra JS/state is
-    // needed to track whether it's open.
+    // a full row. Tracked with its own JS flag (data-toggle-finished-slots)
+    // rather than a native <details> — tapping a slot inside it now causes
+    // a full repaint (to open that slot's detail), which would otherwise
+    // silently re-collapse a native <details> back to closed every time.
     const finishedSummaryHTML = finishedKeys.length ? `
-      <details style="margin-top:4px;">
-        <summary class="overview-row" style="cursor:pointer; border-left-color:var(--alert); opacity:0.75;">
-          <div class="overview-main">
-            <div class="overview-league-name">${finishedKeys.length} time slot${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></div>
-            <div class="overview-payouts">Tap to show</div>
-          </div>
-        </summary>
-        <div class="overview-list" style="margin-top:10px;">${finishedKeys.map(renderSlotRow).join('')}</div>
-      </details>
+      <div class="overview-row" data-toggle-finished-slots="1" style="cursor:pointer; border-left-color:var(--alert); opacity:0.75;">
+        <div class="overview-main">
+          <div class="overview-league-name">${finishedKeys.length} time slot${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></div>
+          <div class="overview-payouts">${finishedSlotsExpanded ? 'Tap to hide' : 'Tap to show'}</div>
+        </div>
+      </div>
+      ${finishedSlotsExpanded ? `<div class="overview-list" style="margin-top:10px;">${finishedKeys.map(renderSlotRow).join('')}</div>` : ''}
     ` : '';
 
     return `
@@ -724,16 +726,26 @@ window.Live = (function(){
       }));
     } else {
       document.querySelectorAll('[data-live-slot]').forEach(row => row.addEventListener('click', () => {
-        selectedTimeSlotKey = row.dataset.liveSlot;
+        const key = row.dataset.liveSlot;
+        // Tapping the slot that's already open closes it instead — only
+        // ever one (or zero) slots open at a time.
+        selectedTimeSlotKey = (selectedTimeSlotKey === key) ? null : key;
         paint();
         // Repaint just replaced the DOM synchronously, so the new row
-        // already exists by the next frame — scroll to it, in case it was
-        // further down the list than the one that was previously open.
-        requestAnimationFrame(() => {
-          const target = document.querySelector(`.overview-row[data-live-slot="${selectedTimeSlotKey}"]`);
-          if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
-        });
+        // already exists by the next frame — scroll to it, but only when
+        // opening one (closing one has nowhere useful to scroll to).
+        if(selectedTimeSlotKey){
+          requestAnimationFrame(() => {
+            const target = document.querySelector(`.overview-row[data-live-slot="${selectedTimeSlotKey}"]`);
+            if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
+          });
+        }
       }));
+      const finishedToggle = document.querySelector('[data-toggle-finished-slots]');
+      if(finishedToggle) finishedToggle.addEventListener('click', () => {
+        finishedSlotsExpanded = !finishedSlotsExpanded;
+        paint();
+      });
       document.querySelectorAll('[data-game-filter-all]').forEach(btn => btn.addEventListener('click', () => {
         gameFilterLeagueIds = new Set(activeLeagues().map(lg => lg.league_id));
         paint();
