@@ -18,9 +18,13 @@ window.Shares = (function(){
   const state = EZL.state; // shared object reference — same `state` app.js uses
 
   function scopedLeagues(){
-    const nonDynasty = state.leagues.filter(lg => !EZL.isDynastyLeague(lg.name));
-    if(state.sharesMainTab === 'all') return state.leagues;
-    if(state.sharesMainTab === 'dynasty') return state.leagues.filter(lg => EZL.isDynastyLeague(lg.name));
+    // Once you're cut from a guillotine league, your roster there no
+    // longer counts toward exposure anywhere — dropped before any of the
+    // category filtering below runs.
+    const activeLeagues = state.leagues.filter(lg => !EZL.isCutFromLeague(lg, state.leagueDetail[lg.league_id]));
+    const nonDynasty = activeLeagues.filter(lg => !EZL.isDynastyLeague(lg.name));
+    if(state.sharesMainTab === 'all') return activeLeagues;
+    if(state.sharesMainTab === 'dynasty') return activeLeagues.filter(lg => EZL.isDynastyLeague(lg.name));
     if(state.sharesSubTab === 'guillotine') return nonDynasty.filter(lg => EZL.isGuillotineLeague(lg.name));
     if(state.sharesSubTab === 'redraft'){
       const trueRedraft = nonDynasty.filter(lg => !EZL.isGuillotineLeague(lg.name));

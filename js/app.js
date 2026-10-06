@@ -830,7 +830,8 @@
         const hasBuyIn = payout && payout.buyIn !== '' && payout.buyIn != null;
         const buyIn = hasBuyIn ? (parseFloat(payout.buyIn)||0) : 0;
         const currency = (payout && payout.currency) || 'USD';
-        return {lg, rank, total, playoffTeams, inPlayoffs, payout, buyIn, hasBuyIn, currency};
+        const amCut = isCutFromLeague(lg, detail);
+        return {lg, rank, total, playoffTeams, inPlayoffs, payout, buyIn, hasBuyIn, currency, amCut};
       }catch(e){
         return {lg, error: e.message || 'Failed to load'};
       }
@@ -885,6 +886,19 @@
     return categoryForLeagueName(name) === 'Dynasty Leagues';
   }
 
+  // True once you've marked yourself cut in a guillotine league (see the
+  // Standings tab's Mark Cut/Restore buttons). Shared by every screen that
+  // needs to stop surfacing a league you're already eliminated from —
+  // Buy-ins (flags it red instead of hiding it, since payout history still
+  // matters), Matchups/Waiver Hub/Live Hub (drop it entirely), and Player
+  // Shares (drop its roster from exposure). Needs `detail` already loaded
+  // (cutRosters lives there) — returns false if it isn't, i.e. fails open
+  // rather than wrongly hiding a league before its data has arrived.
+  function isCutFromLeague(lg, detail){
+    if(!detail) return false;
+    return isGuillotineLeague(lg.name) && (detail.cutRosters || []).includes(detail.myRosterId);
+  }
+
   function renderOverviewRow(r){
     if(r.error){
       return `
@@ -922,9 +936,9 @@
       ? `<span style="color:var(--gold);">${payoutsText}</span>`
       : `<span style="color:var(--chalk-faint);">${payoutsText}</span>`;
     return `
-      <div class="overview-row" id="ov-${r.lg.league_id}">
+      <div class="overview-row" id="ov-${r.lg.league_id}" ${r.amCut ? 'style="border-left-color:var(--alert); background:rgba(193,68,14,0.06);"' : ''}>
         <div class="overview-main">
-          <div class="overview-league-name">${r.lg.name}</div>
+          <div class="overview-league-name">${r.lg.name}${r.amCut ? ` <span class="cut-badge" style="margin-left:6px;">${GUILLOTINE_ICON} CUT</span>` : ''}</div>
           <div class="overview-payouts">
             ${free
               ? '<span style="color:var(--chalk-faint);">Free league — no buy-in</span>'
@@ -1717,6 +1731,7 @@
     faabRemaining,
     isGuillotineLeague,
     isDynastyLeague,
+    isCutFromLeague,
     isDraftComplete,
     findMatchupPair,
     categoryForLeagueName,
