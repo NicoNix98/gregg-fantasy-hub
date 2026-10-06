@@ -10,8 +10,11 @@
 //   - By League: pick a league (grouped into the same categories as the
 //     League List/Shares screens — Redraft Managed/Unmanaged, Guillotine,
 //     Dynasty, Other), see this week's games and who's starting in each.
-//   - By Game: pick one of this week's NFL games, see every league that
-//     has a starter in it, broken down the same way.
+//   - By Time: pick one of the week's TV broadcast windows (Thursday
+//     Night, the early/6pm/9pm Sunday windows, Sunday Night, Monday
+//     Night — classified by kickoff in US Eastern time, not individual
+//     games), see everyone across every selected league playing in it,
+//     merged together with no per-game breakdown.
 // Guillotine leagues have no weekly opponent, so they show your starters
 // only — no "vs" column — same treatment the Standings tab already gives
 // them elsewhere in the app.
@@ -41,12 +44,12 @@ window.Live = (function(){
   // since nothing outside this file needs it (same reasoning as
   // guillotine.js's ccStateByLeague). Persists for the session so flipping
   // to another screen and back doesn't reset your place.
-  let mode = 'league'; // 'league' | 'game'
+  let mode = 'league'; // 'league' | 'time'
   let leagueCategoryTab = null;
   let selectedLeagueId = null;
-  let selectedGameKey = null;
-  // Which leagues feed into the By Game view. null until first render of
-  // By Game mode, at which point it's lazily filled with every league
+  let selectedTimeSlotKey = null;
+  // Which leagues feed into the By Time view. null until first render of
+  // By Time mode, at which point it's lazily filled with every league
   // (i.e. unfiltered) — see ensureGameFilterInitialized().
   let gameFilterLeagueIds = null;
   // By League tab's kickoff-window filter: 'all' | '6pm' | '9pm'. Bucketed
@@ -55,7 +58,7 @@ window.Live = (function(){
   // ET kickoffs that land just after 9pm local (not literally 21:00).
   let leagueTimeFilter = 'all';
 
-  // ---------------- Game schedule (By Game mode only) ----------------
+  // ---------------- Game schedule (By Time mode only) ----------------
   // Sleeper's API has no kickoff-time or confirmed-home/away data (see
   // app.js's SCHEDULE_2026 comment — the home/away flag transcribed from
   // the schedule image was found unreliable ~30% of the time, so it's
@@ -107,12 +110,12 @@ window.Live = (function(){
     }catch(e){ return ''; }
   }
 
-  // Header used both in the By Game list and above the selected game's
-  // detail view — logos always show (they only need the two team
-  // abbreviations from the gameKey itself), but the AWAY @ HOME order and
-  // kickoff time only show when the ESPN schedule lookup succeeded; with
-  // no confirmed home/away, it falls back to the two teams in their
-  // existing alphabetical order with a neutral "vs".
+  // Header for one game's block in By League mode — logos always show
+  // (they only need the two team abbreviations from the gameKey itself),
+  // but the AWAY @ HOME order and kickoff time only show when the ESPN
+  // schedule lookup succeeded; with no confirmed home/away, it falls back
+  // to the two teams in their existing alphabetical order with a neutral
+  // "vs".
   function gameHeaderHTML(gameKey, schedInfo){
     let inner;
     if(schedInfo && schedInfo.awayAbbr && schedInfo.homeAbbr){
@@ -132,7 +135,7 @@ window.Live = (function(){
   // ---------------- Shared per-league computation ----------------
   // Figures out, for one league, which real NFL game each of your (and
   // your opponent's, if any) starters is playing in this week. Both the
-  // By League and By Game views build on this same function rather than
+  // By League and By Time views build on this same function rather than
   // two separate traversals of the same rosters.
   function getPlayerGameInfo(pid, week){
     const info = EZL.playerLabel(pid);
@@ -208,7 +211,7 @@ window.Live = (function(){
 
   // Renders one "vs"-style block (or single-sided for guillotine) for a
   // {label, mine, opp} game bucket. Shared by both the By League single-
-  // league view and the By Game cross-league breakdown. `finished` just
+  // league view and By Time's finished-slot dimming. `finished` just
   // dims the block visually — the FINAL/LIVE badge itself is baked into
   // the `title` HTML the caller passes in.
   function gameBlockHTML(title, mine, opp, isGuillotine, oppLabel, finished){
@@ -284,6 +287,62 @@ window.Live = (function(){
     if(status === 'finished') return ` <span class="cut-badge">FINAL</span>`;
     if(status === 'live') return ` <span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">● LIVE</span>`;
     return '';
+  }
+
+  // ---------------- By Time mode: TV-window classification ----------------
+  // Classifies a kickoff by the NFL's own broadcast windows (Thursday
+  // Night, the three Sunday windows, Sunday Night, Monday Night) rather
+  // than by the viewer's local clock — the windows are fixed in US Eastern
+  // time regardless of what timezone this device is in, and doing it this
+  // way sidesteps the day-rollover ambiguity local time would create (TNF
+  // and SNF both land after midnight local time in the UK, for instance).
+  // Intl's America/New_York conversion handles the EST/EDT switch for us.
+  const TIME_SLOT_ORDER = ['thu', 'sun_intl', 'sun_6pm', 'sun_9pm', 'snf', 'mnf', 'other'];
+  const TIME_SLOT_LABELS = {
+    thu: 'Thursday Night Football',
+    sun_intl: 'Early Sunday Games (International)',
+    sun_6pm: '6pm Sunday Games',
+    sun_9pm: '9pm Sunday Games',
+    snf: 'Sunday Night Football',
+    mnf: 'Monday Night Football',
+    other: 'Other Games',
+  };
+  function getEasternWeekdayHour(date){
+    try{
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+      }).formatToParts(date);
+      const weekday = parts.find(p => p.type === 'weekday').value;
+      let hour = parseInt(parts.find(p => p.type === 'hour').value, 10);
+      if(hour === 24) hour = 0; // some locales report midnight as "24"
+      return {weekday, hour};
+    }catch(e){
+      return null;
+    }
+  }
+  function timeSlotForSchedInfo(schedInfo){
+    if(!schedInfo || !schedInfo.kickoff) return 'other';
+    const eastern = getEasternWeekdayHour(schedInfo.kickoff);
+    if(!eastern) return 'other';
+    const {weekday, hour} = eastern;
+    if(weekday === 'Thu') return 'thu';
+    if(weekday === 'Mon') return 'mnf';
+    if(weekday === 'Sun'){
+      if(hour < 11) return 'sun_intl'; // ~9:30am ET
+      if(hour < 15) return 'sun_6pm';  // ~1:00pm ET
+      if(hour < 19) return 'sun_9pm';  // ~4:05/4:25pm ET
+      return 'snf';                     // ~8:20pm ET
+    }
+    return 'other'; // rare Saturday late-season games, or anything unexpected
+  }
+  // Combines every game's status within a slot into one status for the
+  // slot as a whole: live wins if anything's still going, finished only if
+  // everything in it is done, otherwise upcoming.
+  function slotTimeStatus(bucket){
+    const statuses = bucket.schedInfos.map(getGameTimeStatus);
+    if(statuses.some(s => s === 'live')) return 'live';
+    if(statuses.length && statuses.every(s => s === 'finished')) return 'finished';
+    return 'upcoming';
   }
 
   // ---------------- By League mode: kickoff-window filter ----------------
@@ -396,9 +455,9 @@ window.Live = (function(){
     return pickerHTML + timeFilterHTML + (bd ? renderLeagueBreakdownHTML(bd) : '<div class="loading-row"><div class="spinner"></div> Loading...</div>');
   }
 
-  // ---------------- By Game mode: cross-league player aggregation ----------------
+  // ---------------- By Time mode: cross-league player aggregation ----------------
   // Collapses the same player showing up as a starter in several of your
-  // leagues (for this one game) into a single row with a league count,
+  // leagues (within one time slot) into a single row with a league count,
   // rather than repeating them once per league.
   function aggregatePlayerEntries(entries){
     const map = {};
@@ -448,23 +507,15 @@ window.Live = (function(){
   }
 
   // The number beside each row is how many of your leagues have that
-  // player starting in this game — tap a player to see which leagues (kept
-  // collapsed by default to save space on a phone screen). No team split
-  // here on purpose — just everyone playing for you on one side and
-  // everyone you're up against on the other, which is what actually
-  // matters when deciding what to watch.
-  function renderGameDetailHTML(chosen){
-    const mineEntries = [];
-    const oppEntries = [];
-    chosen.leagues.forEach(entry => {
-      entry.mine.forEach(row => mineEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: entry.lg.name}));
-      if(!entry.isGuillotine){
-        entry.opp.forEach(row => oppEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: entry.lg.name}));
-      }
-    });
-
-    const mineAgg = aggregatePlayerEntries(mineEntries);
-    const oppAgg = aggregatePlayerEntries(oppEntries);
+  // player starting somewhere in this time slot — tap a player to see
+  // which leagues (kept collapsed by default to save space on a phone
+  // screen). No individual games shown here on purpose, and no team split
+  // either — just everyone playing for you on one side and everyone
+  // you're up against on the other, merged across every game in the slot,
+  // which is what actually matters when deciding what to watch.
+  function renderTimeSlotDetailHTML(bucket){
+    const mineAgg = aggregatePlayerEntries(bucket.mineEntries);
+    const oppAgg = aggregatePlayerEntries(bucket.oppEntries);
 
     return `
       <div class="matchup-grid" style="align-items:start;">
@@ -483,7 +534,7 @@ window.Live = (function(){
     `;
   }
 
-  // ---------------- By Game mode ----------------
+  // ---------------- By Time mode ----------------
   function ensureGameFilterInitialized(){
     if(!gameFilterLeagueIds){
       gameFilterLeagueIds = new Set(activeLeagues().map(lg => lg.league_id));
@@ -494,7 +545,7 @@ window.Live = (function(){
     return ids.length === set.size && ids.every(id => set.has(id));
   }
 
-  // Lets you narrow the By Game view down to just your guillotine leagues,
+  // Lets you narrow the By Time view down to just your guillotine leagues,
   // just dynasty, or any custom hand-picked set (e.g. the two close races
   // you're actually watching) — a quick per-category jump plus a
   // multi-select checklist of every league, grouped the same way the
@@ -537,107 +588,99 @@ window.Live = (function(){
     `;
   }
 
-  function buildGamesIndex(){
-    const index = {}; // gameKey -> {label, leagues:[{lg, mine, opp, isGuillotine, oppUser, oppRoster}]}
+  // Builds one bucket per TV time slot (not per game — individual games
+  // aren't tracked here at all, just which slot each one's starters fall
+  // into), merging every selected league's starters straight in.
+  function buildTimeSlotIndex(){
+    const slotData = {};
+    TIME_SLOT_ORDER.forEach(key => { slotData[key] = {mineEntries: [], oppEntries: [], schedInfos: []}; });
     activeLeagues().forEach(lg => {
       if(!gameFilterLeagueIds.has(lg.league_id)) return;
       const bd = buildLeagueBreakdown(lg);
       if(!bd || bd.error) return;
       Object.keys(bd.games).forEach(key => {
         const g = bd.games[key];
-        if(!index[key]) index[key] = {label: g.label, leagues: []};
-        index[key].leagues.push({lg, mine: g.mine, opp: g.opp, isGuillotine: bd.isGuillotine, oppUser: bd.oppUser, oppRoster: bd.oppRoster});
+        const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
+        const slotKey = timeSlotForSchedInfo(schedInfo);
+        const bucket = slotData[slotKey];
+        bucket.schedInfos.push(schedInfo);
+        g.mine.forEach(row => bucket.mineEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: lg.name}));
+        if(!bd.isGuillotine){
+          g.opp.forEach(row => bucket.oppEntries.push({pid: row.pid, info: row.info, proj: row.proj, isActual: row.isActual, lgName: lg.name}));
+        }
       });
     });
-    return index;
+    return slotData;
   }
 
-  function renderByGameMode(){
+  function renderByTimeMode(){
     ensureGameFilterInitialized();
     const filterHTML = renderGameFilterHTML();
 
     if(gameFilterLeagueIds.size === 0){
-      return filterHTML + '<div class="empty-note">No leagues selected — check at least one league above to see games.</div>';
+      return filterHTML + '<div class="empty-note">No leagues selected — check at least one league above to see your players.</div>';
     }
 
-    const index = buildGamesIndex();
-    const gameKeys = sortGameKeysFinishedLast(Object.keys(index), (a,b) =>
-      index[b].leagues.length - index[a].leagues.length || index[a].label.localeCompare(index[b].label)
-    );
-    if(!selectedGameKey || !index[selectedGameKey]){
-      selectedGameKey = gameKeys.length ? gameKeys[0] : null;
+    const slotData = buildTimeSlotIndex();
+    const nonEmptyKeys = TIME_SLOT_ORDER.filter(key => {
+      const b = slotData[key];
+      return b.mineEntries.length || b.oppEntries.length;
+    });
+    const header = `<div class="section-title">By Time Slot <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(Thursday → Monday, finished slots collapsed below)</span></div>`;
+    if(!nonEmptyKeys.length) return filterHTML + header + '<div class="empty-note">No starters found among the selected leagues this week.</div>';
+
+    const slotStatus = {};
+    nonEmptyKeys.forEach(key => { slotStatus[key] = slotTimeStatus(slotData[key]); });
+    const activeKeys = nonEmptyKeys.filter(key => slotStatus[key] !== 'finished');
+    const finishedKeys = nonEmptyKeys.filter(key => slotStatus[key] === 'finished');
+
+    if(!selectedTimeSlotKey || !nonEmptyKeys.includes(selectedTimeSlotKey)){
+      selectedTimeSlotKey = activeKeys[0] || finishedKeys[finishedKeys.length - 1] || null;
     }
-    const header = `<div class="section-title">This Week's Games <span style="color:var(--chalk-faint); text-transform:none; letter-spacing:0; font-size:11px;">(earliest kickoff first, finished games collapsed below)</span></div>`;
-    if(!gameKeys.length) return filterHTML + header + '<div class="empty-note">No games with starters found among the selected leagues this week.</div>';
 
-    const activeKeys = gameKeys.filter(key => !isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
-    const finishedKeys = gameKeys.filter(key => isGameFinished(gameSchedule && gameSchedule.byPairKey[key]));
-
-    // A quick horizontally-scrollable strip of every still-relevant game
-    // (live or upcoming — finished ones are already collapsed below), so
-    // you can jump straight to what you care about without scrolling past
-    // the full list first. Reuses the same data-live-game click handler as
-    // the full rows below — it's just another way to set selectedGameKey.
-    const stripHTML = activeKeys.length ? `
-      <div style="display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; margin-bottom:14px;">
-        ${activeKeys.map(key => {
-          const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
-          const [a, b] = schedInfo && schedInfo.awayAbbr ? [schedInfo.awayAbbr, schedInfo.homeAbbr] : key.split('-');
-          const timeLabel = schedInfo && schedInfo.kickoff ? formatKickoff(schedInfo.kickoff) : '';
-          const status = getGameTimeStatus(schedInfo);
-          const isSelected = key === selectedGameKey;
-          return `
-            <button class="btn ${isSelected?'btn-primary':'btn-ghost'}" data-live-game="${key}" style="display:flex; align-items:center; gap:6px; flex-shrink:0; font-size:12px; white-space:nowrap; padding:6px 12px;">
-              ${teamLogoImg(a, 18)}${teamLogoImg(b, 18)}
-              <span class="mono">${a}/${b}</span>
-              ${status==='live' ? '<span style="color:#7FBF8E;">●</span>' : (timeLabel ? `<span style="color:var(--chalk-faint); font-size:10px;">${timeLabel}</span>` : '')}
-            </button>
-          `;
-        }).join('')}
-      </div>
-    ` : '';
-
-    // Each game's detail (when selected) is rendered as its own item right
-    // after that game's row, inside the same list — not appended once at
+    // Each slot's detail (when selected) is rendered as its own item right
+    // after that slot's row, inside the same list — not appended once at
     // the bottom of the page — so it opens up in place.
-    function renderRow(key){
-      const isSelected = key === selectedGameKey;
-      const schedInfo = gameSchedule && gameSchedule.byPairKey[key];
-      const finished = isGameFinished(schedInfo);
-      const rowStyle = isSelected ? 'border-left-color:var(--gold);' : (finished ? 'border-left-color:var(--alert); opacity:0.65;' : '');
+    function renderSlotRow(key){
+      const bucket = slotData[key];
+      const status = slotStatus[key];
+      const isSelected = key === selectedTimeSlotKey;
+      const mineCount = aggregatePlayerEntries(bucket.mineEntries).length;
+      const oppCount = aggregatePlayerEntries(bucket.oppEntries).length;
+      const badge = status === 'finished' ? ` <span class="cut-badge">FINAL</span>` : (status === 'live' ? ` <span class="pill" style="background:rgba(127,191,142,0.15); color:#7FBF8E;">● LIVE</span>` : '');
+      const rowStyle = isSelected ? 'border-left-color:var(--gold);' : (status === 'finished' ? 'border-left-color:var(--alert); opacity:0.65;' : '');
       const rowHTML = `
-        <div class="overview-row" data-live-game="${key}" ${rowStyle?`style="${rowStyle}"`:''}>
+        <div class="overview-row" data-live-slot="${key}" ${rowStyle?`style="${rowStyle}"`:''}>
           <div class="overview-main">
-            <div class="overview-league-name">${gameHeaderHTML(key, schedInfo)}${gameStatusBadgeHTML(schedInfo)}</div>
-            <div class="overview-payouts">${index[key].leagues.length} league${index[key].leagues.length===1?'':'s'} with a starter in this game</div>
+            <div class="overview-league-name">${TIME_SLOT_LABELS[key] || key}${badge}</div>
+            <div class="overview-payouts">${mineCount} playing for you${oppCount ? ` · ${oppCount} against` : ''}</div>
           </div>
         </div>
       `;
       const detailHTML = isSelected
-        ? `<div style="padding:14px 16px 4px; margin-top:-4px; border:1px solid var(--line); border-top:none; border-radius:0 0 9px 9px; background:var(--surface);">${renderGameDetailHTML(index[key])}</div>`
+        ? `<div style="padding:14px 16px 4px; margin-top:-4px; border:1px solid var(--line); border-top:none; border-radius:0 0 9px 9px; background:var(--surface);">${renderTimeSlotDetailHTML(bucket)}</div>`
         : '';
       return rowHTML + detailHTML;
     }
 
-    const activeItemsHTML = activeKeys.map(renderRow).join('');
-    // Finished games are collapsed behind one tap instead of each taking up
+    const activeItemsHTML = activeKeys.map(renderSlotRow).join('');
+    // Finished slots are collapsed behind one tap instead of each taking up
     // a full row — a native <details> disclosure, so no extra JS/state is
     // needed to track whether it's open.
     const finishedSummaryHTML = finishedKeys.length ? `
       <details style="margin-top:4px;">
         <summary class="overview-row" style="cursor:pointer; border-left-color:var(--alert); opacity:0.75;">
           <div class="overview-main">
-            <div class="overview-league-name">${finishedKeys.length} game${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></div>
+            <div class="overview-league-name">${finishedKeys.length} time slot${finishedKeys.length===1?'':'s'} finished <span class="cut-badge" style="margin-left:8px;">FINAL</span></div>
             <div class="overview-payouts">Tap to show</div>
           </div>
         </summary>
-        <div class="overview-list" style="margin-top:10px;">${finishedKeys.map(renderRow).join('')}</div>
+        <div class="overview-list" style="margin-top:10px;">${finishedKeys.map(renderSlotRow).join('')}</div>
       </details>
     ` : '';
 
     return `
       ${filterHTML}
-      ${stripHTML}
       ${header}
       <div class="overview-list" style="margin-bottom:22px;">${activeItemsHTML || '<div class="empty-note">Everything with a starter has finished — check below.</div>'}${finishedSummaryHTML}</div>
     `;
@@ -650,17 +693,17 @@ window.Live = (function(){
       ${EZL.renderTopbar(true)}
       <div class="body-scroll">
         <div class="section-title">Live Hub — Week ${week}</div>
-        <div class="empty-note" style="margin-bottom:16px;">See which of your starters — and your opponents' — are in each NFL game this week, so you know what's worth watching. Browse by league, or pick a specific game to see every league it touches.</div>
+        <div class="empty-note" style="margin-bottom:16px;">See which of your starters — and your opponents' — are in each NFL game this week, so you know what's worth watching. Browse by league, or by TV time slot (Thursday Night, each Sunday window, Sunday/Monday Night) to see everyone playing without needing to know which specific game they're in.</div>
         <div style="display:flex; gap:6px; margin-bottom:18px;">
           <button class="btn ${mode==='league'?'btn-primary':'btn-ghost'}" id="live-mode-league">By League</button>
-          <button class="btn ${mode==='game'?'btn-primary':'btn-ghost'}" id="live-mode-game">By Game</button>
+          <button class="btn ${mode==='time'?'btn-primary':'btn-ghost'}" id="live-mode-time">By Time</button>
         </div>
-        <div id="live-body">${mode==='league' ? renderByLeagueMode() : renderByGameMode()}</div>
+        <div id="live-body">${mode==='league' ? renderByLeagueMode() : renderByTimeMode()}</div>
       </div>
     `;
     EZL.bindTopbar();
     document.getElementById('live-mode-league').addEventListener('click', () => { mode = 'league'; paint(); });
-    document.getElementById('live-mode-game').addEventListener('click', () => { mode = 'game'; paint(); });
+    document.getElementById('live-mode-time').addEventListener('click', () => { mode = 'time'; paint(); });
     bindModeHandlers();
   }
 
@@ -680,14 +723,14 @@ window.Live = (function(){
         paint();
       }));
     } else {
-      document.querySelectorAll('[data-live-game]').forEach(row => row.addEventListener('click', () => {
-        selectedGameKey = row.dataset.liveGame;
+      document.querySelectorAll('[data-live-slot]').forEach(row => row.addEventListener('click', () => {
+        selectedTimeSlotKey = row.dataset.liveSlot;
         paint();
         // Repaint just replaced the DOM synchronously, so the new row
-        // already exists by the next frame — scroll to it in case it was
-        // picked from the quick-jump strip further up the page.
+        // already exists by the next frame — scroll to it, in case it was
+        // further down the list than the one that was previously open.
         requestAnimationFrame(() => {
-          const target = document.querySelector(`.overview-row[data-live-game="${selectedGameKey}"]`);
+          const target = document.querySelector(`.overview-row[data-live-slot="${selectedTimeSlotKey}"]`);
           if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
         });
       }));
