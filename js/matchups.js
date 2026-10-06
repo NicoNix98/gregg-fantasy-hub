@@ -59,7 +59,7 @@ window.Matchups = (function(){
           }
           const cutSet = new Set(detail.cutRosters || []);
           if(cutSet.has(detail.myRosterId)){
-            return {bucket:'guillotine', row:{lg, cut:true}};
+            return null; // you're out — this league no longer shows up here at all
           }
           const aliveRosters = detail.rosters.filter(r => !cutSet.has(r.roster_id));
           const aliveTotals = aliveRosters.map(r => {
@@ -106,7 +106,9 @@ window.Matchups = (function(){
         }
       }
     }));
-    results.forEach(({bucket, row}) => {
+    results.forEach(result => {
+      if(!result) return; // cut from this guillotine league — left out entirely
+      const {bucket, row} = result;
       if(bucket === 'guillotine') guillotineRows.push(row);
       else rows.push(row);
     });
@@ -176,6 +178,9 @@ window.Matchups = (function(){
         </div>
       `;
     }
+    // r.cut is never produced anymore — a cut league is filtered out of
+    // guillotineRows entirely in renderOverview() above — but this branch
+    // is left in harmlessly in case that ever changes.
     if(r.cut){
       return `
         <div class="overview-row" style="cursor:default; opacity:0.6;">

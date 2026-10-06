@@ -121,6 +121,7 @@ window.Waivers = (function(){
       try{
         let detail = state.leagueDetail[lg.league_id];
         if(!detail){ detail = await EZL.loadLeagueDetail(lg.league_id, state.sleeperUserId); state.leagueDetail[lg.league_id] = detail; }
+        if(EZL.isCutFromLeague(lg, detail)) return {category, entry: null}; // you're out — no waivers to chase here anymore
         const owned = EZL.computeOwnedPlayerIds(detail);
         const candidates = [];
         if(state.projectionsCache){

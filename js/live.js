@@ -28,6 +28,15 @@ window.Live = (function(){
   const EZL = window.EZL;
   const state = EZL.state; // shared object reference — same `state` app.js uses
 
+  // Every league picker, filter and game index in this file builds on this
+  // instead of state.leagues directly, so a guillotine league you've been
+  // cut from simply stops appearing here. The one exception is render()'s
+  // own detail-loading loop below, which still has to load every league's
+  // detail to find out who's cut in the first place.
+  function activeLeagues(){
+    return state.leagues.filter(lg => !EZL.isCutFromLeague(lg, state.leagueDetail[lg.league_id]));
+  }
+
   // Local UI state for this screen only — deliberately not on EZL.state,
   // since nothing outside this file needs it (same reasoning as
   // guillotine.js's ccStateByLeague). Persists for the session so flipping
@@ -360,7 +369,7 @@ window.Live = (function(){
 
   // ---------------- By League mode ----------------
   function renderLeaguePickerHTML(){
-    const groups = EZL.groupByCategory(state.leagues, lg => lg.name);
+    const groups = EZL.groupByCategory(activeLeagues(), lg => lg.name);
     if(!leagueCategoryTab || !groups.find(g => g.category === leagueCategoryTab)){
       leagueCategoryTab = groups.length ? groups[0].category : null;
     }
@@ -382,7 +391,7 @@ window.Live = (function(){
     const pickerHTML = renderLeaguePickerHTML();
     const timeFilterHTML = renderLeagueTimeFilterHTML();
     if(!selectedLeagueId) return pickerHTML + timeFilterHTML + '<div class="empty-note">No leagues found.</div>';
-    const lg = state.leagues.find(l => l.league_id === selectedLeagueId);
+    const lg = activeLeagues().find(l => l.league_id === selectedLeagueId);
     const bd = buildLeagueBreakdown(lg);
     return pickerHTML + timeFilterHTML + (bd ? renderLeagueBreakdownHTML(bd) : '<div class="loading-row"><div class="spinner"></div> Loading...</div>');
   }
@@ -477,7 +486,7 @@ window.Live = (function(){
   // ---------------- By Game mode ----------------
   function ensureGameFilterInitialized(){
     if(!gameFilterLeagueIds){
-      gameFilterLeagueIds = new Set(state.leagues.map(lg => lg.league_id));
+      gameFilterLeagueIds = new Set(activeLeagues().map(lg => lg.league_id));
     }
   }
 
@@ -491,8 +500,8 @@ window.Live = (function(){
   // multi-select checklist of every league, grouped the same way the
   // League List/Shares screens are.
   function renderGameFilterHTML(){
-    const groups = EZL.groupByCategory(state.leagues, lg => lg.name);
-    const allIds = state.leagues.map(lg => lg.league_id);
+    const groups = EZL.groupByCategory(activeLeagues(), lg => lg.name);
+    const allIds = activeLeagues().map(lg => lg.league_id);
     const allSelected = idsMatchSet(allIds, gameFilterLeagueIds);
 
     const quickButtonsHTML = `
@@ -530,7 +539,7 @@ window.Live = (function(){
 
   function buildGamesIndex(){
     const index = {}; // gameKey -> {label, leagues:[{lg, mine, opp, isGuillotine, oppUser, oppRoster}]}
-    state.leagues.forEach(lg => {
+    activeLeagues().forEach(lg => {
       if(!gameFilterLeagueIds.has(lg.league_id)) return;
       const bd = buildLeagueBreakdown(lg);
       if(!bd || bd.error) return;
@@ -683,12 +692,12 @@ window.Live = (function(){
         });
       }));
       document.querySelectorAll('[data-game-filter-all]').forEach(btn => btn.addEventListener('click', () => {
-        gameFilterLeagueIds = new Set(state.leagues.map(lg => lg.league_id));
+        gameFilterLeagueIds = new Set(activeLeagues().map(lg => lg.league_id));
         paint();
       }));
       document.querySelectorAll('[data-game-filter-cat]').forEach(btn => btn.addEventListener('click', () => {
         const cat = btn.dataset.gameFilterCat;
-        gameFilterLeagueIds = new Set(state.leagues.filter(lg => EZL.categoryForLeagueName(lg.name) === cat).map(lg => lg.league_id));
+        gameFilterLeagueIds = new Set(activeLeagues().filter(lg => EZL.categoryForLeagueName(lg.name) === cat).map(lg => lg.league_id));
         paint();
       }));
       document.querySelectorAll('[data-game-filter-league]').forEach(cb => cb.addEventListener('change', () => {
